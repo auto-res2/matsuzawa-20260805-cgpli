@@ -1,0 +1,279 @@
+name: "Run Interactive Repo Agent"
+run-name: "🤖 Interactive [${{ inputs.github_actions_agent }}]: ${{ inputs.model_name }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_username:
+        description: 'Username for ttyd Basic authentication'
+        required: true
+        type: string
+      session_password:
+        description: 'Password for ttyd Basic authentication'
+        required: true
+        type: string
+      github_actions_agent:
+        description: 'AI agent tool to use (claude_code or open_code)'
+        required: true
+        type: choice
+        options:
+          - claude_code
+          - open_code
+        default: 'claude_code'
+      model_name:
+        description: 'Model to use (for OpenCode: openrouter/openai/gpt-5-nano, for Claude Code: sonnet/opus/haiku)'
+        required: true
+        default: 'sonnet'
+      timeout_minutes:
+        description: 'Session duration in minutes (max 360)'
+        required: false
+        default: '120'
+        type: choice
+        options:
+          - '60'
+          - '120'
+          - '180'
+          - '240'
+          - '360'
+
+permissions:
+  id-token: write
+  contents: write
+  actions: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  interactive-session:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(github.event.inputs.timeout_minutes) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install common dependencies
+        run: |
+          # Tmux
+          sudo apt-get update && sudo apt-get install -y tmux
+
+          # ttyd (Web terminal)
+          TTYD_VERSION="1.7.7"
+          wget -q "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.x86_64" -O /usr/local/bin/ttyd
+          chmod +x /usr/local/bin/ttyd
+
+          # cloudflared (Cloudflare Tunnel)
+          wget -q "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" -O /usr/local/bin/cloudflared
+          chmod +x /usr/local/bin/cloudflared
+
+      - name: Install Claude Code
+        if: github.event.inputs.github_actions_agent == 'claude_code'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Install OpenCode
+        if: github.event.inputs.github_actions_agent == 'open_code'
+        run: |
+          set -e
+          for i in 1 2 3 4 5; do
+            if curl -fsSL https://opencode.ai/install | bash; then
+              break
+            fi
+            if [ "$i" -lt 5 ]; then
+              sleep $((2**i))
+            else
+              echo "::error::OpenCode install failed after $i attempts"
+              exit 1
+            fi
+          done
+
+      - name: Configure git
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+
+      - name: Resolve LLM provider (OpenCode)
+        if: github.event.inputs.github_actions_agent == 'open_code'
+        run: |
+          set -e
+          MODEL="${{ github.event.inputs.model_name }}"
+          echo "Resolving provider for model: $MODEL"
+
+          case "$MODEL" in
+            openrouter/*)
+              echo "LLM_PROVIDER=openrouter" >> "$GITHUB_ENV"
+              echo "OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}" >> "$GITHUB_ENV"
+              ;;
+            openai/*)
+              echo "LLM_PROVIDER=openai" >> "$GITHUB_ENV"
+              echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> "$GITHUB_ENV"
+              ;;
+            anthropic/*)
+              echo "LLM_PROVIDER=anthropic" >> "$GITHUB_ENV"
+              echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}" >> "$GITHUB_ENV"
+              ;;
+            google/*)
+              echo "LLM_PROVIDER=google" >> "$GITHUB_ENV"
+              echo "GOOGLE_API_KEY=${{ secrets.GEMINI_API_KEY }}" >> "$GITHUB_ENV"
+              ;;
+            azure/*)
+              echo "LLM_PROVIDER=azure" >> "$GITHUB_ENV"
+              echo "AZURE_OPENAI_API_KEY=${{ secrets.AZURE_OPENAI_API_KEY }}" >> "$GITHUB_ENV"
+              echo "AZURE_OPENAI_ENDPOINT=${{ secrets.AZURE_OPENAI_ENDPOINT }}" >> "$GITHUB_ENV"
+              echo "AZURE_OPENAI_API_VERSION=2024-10-01-preview" >> "$GITHUB_ENV"
+              ;;
+            bedrock/*)
+              echo "LLM_PROVIDER=bedrock" >> "$GITHUB_ENV"
+              echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> "$GITHUB_ENV"
+              echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> "$GITHUB_ENV"
+              echo "AWS_DEFAULT_REGION=${{ secrets.AWS_DEFAULT_REGION }}" >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "::error::Unsupported model_name: $MODEL"
+              exit 1
+              ;;
+          esac
+
+      - name: Start interactive agent session
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SESSION_USERNAME: ${{ github.event.inputs.session_username }}
+          SESSION_PASSWORD: ${{ github.event.inputs.session_password }}
+          AGENT_TYPE: ${{ github.event.inputs.github_actions_agent }}
+          MODEL_NAME: ${{ github.event.inputs.model_name }}
+        run: |
+          echo "============================================"
+          echo " Interactive Agent Session"
+          echo " Agent: $AGENT_TYPE | Model: $MODEL_NAME"
+          echo "============================================"
+
+          # ── 1. Tmux session ──
+          TMUX_SESSION="airas-session"
+          TMUX_TMPDIR="/tmp/tmux-$(id -u)"
+          mkdir -p "$TMUX_TMPDIR"
+          chmod 700 "$TMUX_TMPDIR"
+
+          tmux new-session -d -s $TMUX_SESSION
+          tmux has-session -t $TMUX_SESSION
+          echo "[OK] Tmux session '$TMUX_SESSION' created"
+
+          # ── 2. Inject env vars and launch agent ──
+          tmux set-environment -g GITHUB_TOKEN "$GITHUB_TOKEN"
+
+          if [ "$AGENT_TYPE" = "claude_code" ]; then
+            tmux set-environment -g ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY"
+            tmux send-keys -t $TMUX_SESSION 'claude' C-m
+            echo "[OK] Claude Code launched inside tmux session"
+          else
+            # OpenCode: inject provider-specific env vars resolved in earlier step
+            for VAR in OPENROUTER_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY GOOGLE_API_KEY \
+                       AZURE_OPENAI_API_KEY AZURE_OPENAI_ENDPOINT AZURE_OPENAI_API_VERSION \
+                       AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION; do
+              VAL="${!VAR}"
+              if [ -n "$VAL" ]; then
+                tmux set-environment -g "$VAR" "$VAL"
+              fi
+            done
+            tmux send-keys -t $TMUX_SESSION "opencode --model $MODEL_NAME" C-m
+            echo "[OK] OpenCode launched inside tmux session (model: $MODEL_NAME)"
+          fi
+
+          sleep 5
+
+          # ── Mask sensitive values in logs ──
+          echo "::add-mask::${SESSION_USERNAME}"
+          echo "::add-mask::${SESSION_PASSWORD}"
+
+          # ── 3. ttyd (Web Terminal) ──
+          ttyd \
+            -W \
+            -p 7681 \
+            -c "${SESSION_USERNAME}:${SESSION_PASSWORD}" \
+            -t fontSize=16 \
+            -t cursorBlink=true \
+            tmux attach -t $TMUX_SESSION &
+
+          echo $! > /tmp/ttyd.pid
+          echo "[OK] ttyd started on port 7681 (PID: $(cat /tmp/ttyd.pid))"
+
+          sleep 2
+
+          # ── 4. Cloudflare Tunnel ──
+          cloudflared tunnel --url http://localhost:7681 2>&1 | tee /tmp/cloudflared.log &
+          echo $! > /tmp/cloudflared.pid
+
+          echo ""
+          echo "Waiting for Cloudflare Tunnel URL..."
+          for i in $(seq 1 30); do
+            TUNNEL_URL=$(grep -o 'https://[a-z0-9\-]*\.trycloudflare\.com' /tmp/cloudflared.log 2>/dev/null | head -1 || true)
+            if [ -n "$TUNNEL_URL" ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          # ── 5. Save tunnel URL for artifact upload ──
+          if [ -n "$TUNNEL_URL" ]; then
+            echo "::add-mask::${TUNNEL_URL}"
+            cat > /tmp/tunnel_url.json <<EOF
+          {
+            "tunnel_url": "$TUNNEL_URL",
+            "github_actions_agent": "$AGENT_TYPE",
+            "model_name": "$MODEL_NAME"
+          }
+          EOF
+            echo "TUNNEL_URL=$TUNNEL_URL" >> "$GITHUB_ENV"
+          fi
+
+          echo ""
+          echo "============================================"
+          echo " SESSION READY"
+          echo "============================================"
+          echo ""
+          if [ -n "$TUNNEL_URL" ]; then
+            echo "  Access URL : $TUNNEL_URL"
+          else
+            echo "  [WARN] Tunnel URL not detected yet."
+            echo "  Check the logs above for the URL."
+          fi
+          echo ""
+          echo "  Agent      : $AGENT_TYPE"
+          echo "  Model      : $MODEL_NAME"
+          echo "  Auth       : Basic (credentials specified in workflow_dispatch)"
+          echo ""
+          echo "  Timeout    : ${{ github.event.inputs.timeout_minutes }} minutes"
+          echo ""
+          echo "  Tips:"
+          echo "    - Session persists across browser reloads"
+          echo "    - To end the session, cancel the workflow from the Actions page"
+          echo "============================================"
+
+      - name: Upload tunnel URL as artifact
+        if: env.TUNNEL_URL != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: tunnel-url
+          path: /tmp/tunnel_url.json
+
+      - name: Wait for session
+        run: |
+          TMUX_SESSION="airas-session"
+          while tmux has-session -t $TMUX_SESSION 2>/dev/null; do
+            sleep 300
+          done
+          echo "Tmux session ended."
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kill "$(cat /tmp/ttyd.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/cloudflared.pid 2>/dev/null)" 2>/dev/null || true
+          echo "Cleanup complete."

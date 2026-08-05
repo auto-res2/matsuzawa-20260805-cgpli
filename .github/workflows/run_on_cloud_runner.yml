@@ -1,0 +1,147 @@
+name: "Run Workflow on Cloud Runner"
+run-name: "Cloud Runner: [${{ inputs.mode }}] ${{ inputs.run_id }}"
+
+# Wrapper workflow that:
+#   1. Launches an on-demand cloud instance (AWS EC2 or GCP)
+#   2. Registers it as a GitHub Actions self-hosted runner
+#   3. Dispatches the target workflow on that runner
+#   Instance teardown is handled by the on-instance watchdog
+#   (auto-shutdown after job completes or max lifetime exceeded).
+#
+# This keeps existing workflows unchanged — they continue to accept
+# runner_label as input and run on whatever runner is provided.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Experiment mode'
+        required: true
+        type: choice
+        options:
+          - sanity
+          - pilot
+          - main
+      run_id:
+        description: 'run_id to pass to the target workflow'
+        required: true
+      branch_name:
+        description: 'Branch name (default: current branch)'
+        required: false
+        default: ''
+      cloud_provider:
+        description: 'Cloud provider'
+        required: true
+        type: choice
+        options:
+          - aws
+          - gcp
+        default: 'aws'
+      gpu_instance_type:
+        description: 'Primary instance type (fallback: g5.xlarge, g6.xlarge, g4dn.2xlarge, g5.2xlarge)'
+        required: false
+        default: 'g4dn.xlarge'
+      max_instance_hours:
+        description: 'Max instance lifetime in hours (safety net for orphaned instances)'
+        required: false
+        default: '120'
+
+env:
+  TARGET_WORKFLOW: run_experiment.yml
+
+permissions:
+  id-token: write
+  contents: write
+  actions: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ------------------------------------------------------------------
+  # Step 1: Launch GPU instance and register as self-hosted runner
+  # ------------------------------------------------------------------
+  start-runner:
+    name: Start GPU Runner (${{ inputs.cloud_provider }})
+    runs-on: ubuntu-latest
+    outputs:
+      runner-label: ${{ steps.start.outputs.runner-label }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to cloud provider (AWS)
+        if: inputs.cloud_provider == 'aws'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'ap-northeast-1' }}
+
+      - name: Authenticate to cloud provider (GCP)
+        if: inputs.cloud_provider == 'gcp'
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up cloud CLI (GCP)
+        if: inputs.cloud_provider == 'gcp'
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Start GPU instance
+        id: start
+        env:
+          CLOUD_PROVIDER: ${{ inputs.cloud_provider }}
+          GPU_INSTANCE_TYPE: ${{ inputs.gpu_instance_type }}
+          MAX_INSTANCE_HOURS: ${{ inputs.max_instance_hours }}
+          GH_PERSONAL_ACCESS_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          # AWS (AWS_REGION is optional; falls back to us-east-1 then other regions)
+          EC2_AMI_ID: ${{ secrets.EC2_AMI_ID }}
+          EC2_SUBNET_ID: ${{ secrets.EC2_SUBNET_ID }}
+          EC2_SECURITY_GROUP_ID: ${{ secrets.EC2_SECURITY_GROUP_ID }}
+          EC2_IAM_INSTANCE_PROFILE: ${{ secrets.EC2_IAM_INSTANCE_PROFILE }}
+          # GCP
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+          GCP_ZONE: ${{ secrets.GCP_ZONE }}
+          GCP_MACHINE_IMAGE: ${{ secrets.GCP_MACHINE_IMAGE }}
+          GCP_ACCELERATOR_TYPE: ${{ secrets.GCP_ACCELERATOR_TYPE }}
+          GCP_ACCELERATOR_COUNT: ${{ secrets.GCP_ACCELERATOR_COUNT }}
+          GCP_SUBNET: ${{ secrets.GCP_SUBNET }}
+        run: bash .github/scripts/cloud-gpu-runner.sh start
+
+  # ------------------------------------------------------------------
+  # Step 2: Dispatch the target workflow on the GPU runner
+  # Instance teardown is handled by the on-instance watchdog.
+  # ------------------------------------------------------------------
+  dispatch-target:
+    name: Dispatch Experiment workflow
+    needs: [start-runner]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch target workflow
+        env:
+          GH_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        run: |
+          BRANCH="${{ inputs.branch_name }}"
+          if [[ -z "$BRANCH" ]]; then
+            BRANCH="${{ github.ref_name }}"
+          fi
+
+          RUNNER_LABEL='["${{ needs.start-runner.outputs.runner-label }}"]'
+
+          echo "Dispatching ${TARGET_WORKFLOW} with:"
+          echo "  mode: ${{ inputs.mode }}"
+          echo "  branch: ${BRANCH}"
+          echo "  run_id: ${{ inputs.run_id }}"
+          echo "  runner_label: ${RUNNER_LABEL}"
+
+          gh workflow run "${TARGET_WORKFLOW}" \
+            --repo "${{ github.repository }}" \
+            --ref "${BRANCH}" \
+            -f mode="${{ inputs.mode }}" \
+            -f run_id="${{ inputs.run_id }}" \
+            -f runner_label="${RUNNER_LABEL}" \
+            -f branch_name="${BRANCH}"
+
+          echo "Workflow dispatched. Instance will self-terminate after job completes."
