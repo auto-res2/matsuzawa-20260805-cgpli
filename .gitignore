@@ -201,4 +201,4 @@ models/
 .cache/
 wandb/
 outputs/
-.research/results/
+
