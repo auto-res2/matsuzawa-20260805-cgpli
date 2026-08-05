@@ -1,0 +1,85 @@
+name: 'Run Claude Code'
+description: 'Execute Claude Code with specified model and prompt'
+
+inputs:
+  prompt:
+    description: 'Prompt to pass to Claude Code (ignored if prompt_file is provided)'
+    required: false
+  prompt_file:
+    description: 'Path to file containing the prompt (alternative to prompt)'
+    required: false
+  model_name:
+    description: 'Claude model to use (sonnet, opus, haiku)'
+    required: false
+    default: "claude-sonnet-4-5-20250929"
+  max_turns:
+    description: 'Maximum number of turns'
+    required: false
+    default: '100'
+  timeout_minutes:
+    description: 'Timeout in minutes for Claude Code execution'
+    required: false
+    default: '20'
+  mcp_config:
+    description: 'Path to MCP server config JSON file'
+    required: false
+    default: ''
+  mcp_timeout:
+    description: 'MCP server timeout in milliseconds'
+    required: false
+    default: '600000'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install uv (for uvx MCP servers)
+      uses: astral-sh/setup-uv@v5
+
+    - name: Prepare prompt
+      shell: bash
+      run: |
+        # Normalize model name (remove anthropic/ prefix if present)
+        MODEL_NAME="${{ inputs.model_name }}"
+        MODEL_NAME="${MODEL_NAME#anthropic/}"
+        echo "CLAUDE_MODEL_NAME=${MODEL_NAME}" >> $GITHUB_ENV
+
+        # Build MCP config flags (default + workflow-specific)
+        MCP_FLAG=""
+        DEFAULT_MCP=".github/mcp-config.json"
+        if [ -f "$DEFAULT_MCP" ]; then
+          MCP_FLAG="--mcp-config $DEFAULT_MCP"
+          echo "Default MCP config found: $DEFAULT_MCP"
+        fi
+        if [ -n "${{ inputs.mcp_config }}" ]; then
+          MCP_FLAG="$MCP_FLAG --mcp-config ${{ inputs.mcp_config }}"
+          echo "Additional MCP config: ${{ inputs.mcp_config }}"
+        fi
+        echo "CLAUDE_MCP_FLAG=${MCP_FLAG}" >> $GITHUB_ENV
+
+        if [ -n "${{ inputs.prompt_file }}" ]; then
+          if [ ! -f "${{ inputs.prompt_file }}" ]; then
+            echo "::error::Prompt file not found: ${{ inputs.prompt_file }}"
+            exit 1
+          fi
+          echo "Using prompt file reference: ${{ inputs.prompt_file }}"
+          echo "CLAUDE_PROMPT<<EOF" >> $GITHUB_ENV
+          echo "Please read and execute the instructions in the file: ${{ inputs.prompt_file }}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+        else
+          echo "Using inline prompt"
+          echo "CLAUDE_PROMPT<<EOF" >> $GITHUB_ENV
+          echo "${{ inputs.prompt }}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+        fi
+
+    - name: Execute Claude Code
+      continue-on-error: true
+      uses: anthropics/claude-code-action@v1
+      with:
+        anthropic_api_key: ${{ env.ANTHROPIC_API_KEY }}
+        prompt: ${{ env.CLAUDE_PROMPT }}
+        allowed_bots: '*'
+        show_full_output: true
+        claude_args: "--model=${{ env.CLAUDE_MODEL_NAME }} --max-turns=${{ inputs.max_turns }} --dangerously-skip-permissions ${{ env.CLAUDE_MCP_FLAG }}"
+      env:
+        MCP_TIMEOUT: ${{ inputs.mcp_timeout }}
