@@ -1,0 +1,162 @@
+name: "Run Verification Code Generator"
+run-name: "🤖 Verification Code Generator"
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: 'Branch name (e.g., main)'
+        required: true
+        default: 'main'
+      user_query:
+        description: 'User verification query'
+        required: true
+      what_to_verify:
+        description: 'Detailed description of what to verify'
+        required: true
+      experiment_settings:
+        description: 'Experiment settings (JSON text)'
+        required: true
+      steps:
+        description: 'Ordered list of experiment steps (JSON text)'
+        required: true
+      modification_notes:
+        description: 'User notes for code generation modifications'
+        required: false
+        default: ''
+      github_actions_agent:
+        description: 'AI agent tool to use (claude_code or open_code)'
+        required: true
+        type: choice
+        options:
+          - claude_code
+          - open_code
+        default: 'claude_code'
+      model_name:
+        description: 'Model to use (for OpenCode: openrouter/openai/gpt-5-nano, for Claude Code: sonnet/opus/haiku)'
+        required: true
+        default: 'sonnet'
+      prompt_path:
+        description: 'Path to the prompt template file'
+        required: false
+        default: '.github/prompts/run_code_generator.md'
+
+permissions:
+  id-token: write
+  contents: write
+  actions: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  codegen:
+    name: Generate Verification Code
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch_name }}
+
+      - name: Install AI Research Skills
+        run: |
+          mkdir -p ~/.claude/skills ~/.config/opencode/skills
+          npx @orchestra-research/ai-research-skills install --all --local
+
+      - name: Build verification code generation prompt
+        id: build-prompt
+        env:
+          PROMPT_PATH: ${{ github.event.inputs.prompt_path }}
+          USER_QUERY: ${{ github.event.inputs.user_query }}
+          WHAT_TO_VERIFY: ${{ github.event.inputs.what_to_verify }}
+          EXPERIMENT_SETTINGS: ${{ github.event.inputs.experiment_settings }}
+          STEPS: ${{ github.event.inputs.steps }}
+          MODIFICATION_NOTES: ${{ github.event.inputs.modification_notes }}
+        run: |
+          set -e
+          if [ ! -f "$PROMPT_PATH" ]; then
+            echo "::error::Prompt file not found: $PROMPT_PATH"
+            exit 1
+          fi
+
+          PROMPT_FILE="/tmp/verification_code_generator_prompt.txt"
+          {
+            cat "$PROMPT_PATH"
+            echo ""
+            echo "INPUT_DATA:"
+            echo "user_query:"
+            printf "%s\n" "$USER_QUERY"
+            echo "what_to_verify:"
+            printf "%s\n" "$WHAT_TO_VERIFY"
+            echo "experiment_settings:"
+            printf "%s\n" "$EXPERIMENT_SETTINGS"
+            echo "steps:"
+            printf "%s\n" "$STEPS"
+            echo "modification_notes:"
+            printf "%s\n" "$MODIFICATION_NOTES"
+          } > "$PROMPT_FILE"
+
+          echo "prompt_file=$PROMPT_FILE" >> "$GITHUB_OUTPUT"
+          echo "Prompt saved to: $PROMPT_FILE ($(wc -c < "$PROMPT_FILE") bytes)"
+
+      - name: Run Claude Code for code generation
+        if: github.event.inputs.github_actions_agent == 'claude_code'
+        uses: ./.github/actions/run-claude-code
+        with:
+          prompt_file: ${{ steps.build-prompt.outputs.prompt_file }}
+          model_name: ${{ github.event.inputs.model_name }}
+          timeout_minutes: '15'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+
+      - name: Run OpenCode for code generation
+        if: github.event.inputs.github_actions_agent == 'open_code'
+        uses: ./.github/actions/run-open-code
+        with:
+          prompt_file: ${{ steps.build-prompt.outputs.prompt_file }}
+          model_name: ${{ github.event.inputs.model_name }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_BASEURL: ${{ secrets.LANGFUSE_BASE_URL }}
+
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_API_VERSION: "2024-10-01-preview"
+
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+
+      - name: Commit and push code generation changes
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+          git add Dockerfile config/ src/ pyproject.toml
+
+          if ! git diff --staged --quiet; then
+            git commit -m "[CI] Verification code generation using ${{ github.event.inputs.github_actions_agent }}"
+            git checkout -- .
+            for i in {1..5}; do
+              git pull --rebase -X theirs origin ${{ github.event.inputs.branch_name }}
+              git push && break
+              echo "Push failed on attempt $i. Retrying in $((2**i)) seconds..."
+              sleep $((2**i))
+            done
+          else
+            echo "Code generation made no changes to the code."
+          fi

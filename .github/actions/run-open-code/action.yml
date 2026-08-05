@@ -1,0 +1,218 @@
+name: "Run OpenCode"
+description: "Setup OpenCode, resolve LLM provider, and run opencode with retry"
+
+inputs:
+  model_name:
+    description: "Model name (e.g. openrouter/openai/gpt-5-nano)"
+    required: true
+  prompt:
+    description: "Prompt passed to opencode (ignored if prompt_file is provided)"
+    required: false
+  prompt_file:
+    description: "Path to file containing the prompt (alternative to prompt)"
+    required: false
+  max_retries:
+    description: 'Maximum number of retries'
+    required: false
+    default: '10'
+  mcp_config:
+    description: 'Path to MCP server config JSON file (will be merged into .opencode/opencode.jsonc)'
+    required: false
+    default: ''
+  mcp_timeout:
+    description: 'Global MCP tool call timeout in milliseconds'
+    required: false
+    default: '600000'
+
+runs:
+  using: "composite"
+  steps:
+    # -----------------------------
+    # Runtime setup
+    # -----------------------------
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+
+    - name: Install uv (for uvx MCP servers)
+      uses: astral-sh/setup-uv@v5
+
+    - name: Install bun
+      shell: bash
+      run: npm install -g bun
+
+    - name: Install OpenCode
+      shell: bash
+      run: |
+        set -e
+        for i in 1 2 3 4 5; do
+          if curl -fsSL https://opencode.ai/install | bash; then
+            break
+          fi
+          if [ "$i" -lt 5 ]; then
+            sleep $((2**i))
+          else
+            echo "::error::OpenCode install failed after $i attempts"
+            exit 1
+          fi
+        done
+        npm install opencode-plugin-langfuse
+
+    # -----------------------------
+    # Merge MCP config if provided
+    # -----------------------------
+    - name: Merge MCP config into opencode.jsonc
+      shell: bash
+      run: |
+        set -e
+        OPENCODE_CONFIG=".opencode/opencode.jsonc"
+        DEFAULT_MCP=".github/mcp-config.json"
+        EXTRA_MCP="${{ inputs.mcp_config }}"
+
+        # Collect MCP config files to merge (default + workflow-specific)
+        MCP_FILES=()
+        if [ -f "$DEFAULT_MCP" ]; then
+          MCP_FILES+=("$DEFAULT_MCP")
+          echo "Default MCP config found: $DEFAULT_MCP"
+        fi
+        if [ -n "$EXTRA_MCP" ]; then
+          if [ ! -f "$EXTRA_MCP" ]; then
+            echo "::error::MCP config file not found: $EXTRA_MCP"
+            exit 1
+          fi
+          MCP_FILES+=("$EXTRA_MCP")
+          echo "Additional MCP config: $EXTRA_MCP"
+        fi
+
+        if [ ${#MCP_FILES[@]} -eq 0 ]; then
+          echo "No MCP config files to merge, skipping"
+          exit 0
+        fi
+
+        # Convert claude-code-action MCP format to OpenCode format and merge
+        # Input:  { "mcpServers": { "name": { "command": "cmd", "args": [...], "env": {...} } } }
+        # Output in opencode.jsonc: { "mcp": { "name": { "type": "local", "command": ["cmd", ...args], "environment": {...} } } }
+        node -e "
+        const fs = require('fs');
+        const mcpFiles = process.argv.slice(1);
+
+        // Read opencode config (strip // comments)
+        const raw = fs.readFileSync('$OPENCODE_CONFIG', 'utf8');
+        const config = JSON.parse(raw.replace(/^(\s*)\/\/.*/gm, '').replace(/(?<=[^:])\/\/.*/g, ''));
+
+        // Merge all MCP config files
+        const mcp = config.mcp || {};
+        for (const file of mcpFiles) {
+          const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+          for (const [name, server] of Object.entries(data.mcpServers || {})) {
+            const entry = { type: 'local', command: [server.command, ...(server.args || [])] };
+            if (server.env) entry.environment = server.env;
+            mcp[name] = entry;
+          }
+        }
+
+        config.mcp = mcp;
+        // Set global MCP timeout to avoid timeout on slow MCP tools like image generation
+        config.experimental = config.experimental || {};
+        config.experimental.mcp_timeout = ${{ inputs.mcp_timeout }};
+        fs.writeFileSync('$OPENCODE_CONFIG', JSON.stringify(config, null, 2));
+        " "${MCP_FILES[@]}"
+        echo "MCP config merged into $OPENCODE_CONFIG"
+        cat "$OPENCODE_CONFIG"
+
+    # -----------------------------
+    # Resolve LLM provider
+    # -----------------------------
+    - name: Resolve LLM provider and export env
+      shell: bash
+      run: |
+        set -e
+
+        MODEL="${{ inputs.model_name }}"
+        echo "Resolving provider for model: $MODEL"
+
+        case "$MODEL" in
+          openrouter/*)
+            echo "PROVIDER=openrouter" >> "$GITHUB_ENV"
+            echo "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}" >> "$GITHUB_ENV"
+            ;;
+
+          openai/*)
+            echo "PROVIDER=openai" >> "$GITHUB_ENV"
+            echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> "$GITHUB_ENV"
+            ;;
+
+          anthropic/*)
+            echo "PROVIDER=anthropic" >> "$GITHUB_ENV"
+            echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> "$GITHUB_ENV"
+            ;;
+
+          google/*)
+            echo "PROVIDER=google" >> "$GITHUB_ENV"
+            echo "GOOGLE_API_KEY=${GOOGLE_API_KEY}" >> "$GITHUB_ENV"
+            ;;
+
+          azure/*)
+            echo "PROVIDER=azure" >> "$GITHUB_ENV"
+            echo "AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY}" >> "$GITHUB_ENV"
+            echo "AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}" >> "$GITHUB_ENV"
+            echo "AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION:-2024-10-01-preview}" >> "$GITHUB_ENV"
+            ;;
+
+          bedrock/*)
+            echo "PROVIDER=bedrock" >> "$GITHUB_ENV"
+            echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}" >> "$GITHUB_ENV"
+            echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}" >> "$GITHUB_ENV"
+            echo "AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}" >> "$GITHUB_ENV"
+            ;;
+
+          *)
+            echo "❌ Unsupported model_name: $MODEL"
+            exit 1
+            ;;
+        esac
+
+        echo "Resolved provider: $PROVIDER"
+
+    # -----------------------------
+    # Run OpenCode with retry
+    # -----------------------------
+
+    # NOTE: OpenCode's streaming output causes traces to be fragmented in Langfuse 
+    - name: Run OpenCode
+      shell: bash
+      run: |
+        set -e
+        
+        # Prepare prompt: reference file instead of embedding content
+        if [ -n "${{ inputs.prompt_file }}" ]; then
+          if [ ! -f "${{ inputs.prompt_file }}" ]; then
+            echo "::error::Prompt file not found: ${{ inputs.prompt_file }}"
+            exit 1
+          fi
+          echo "Using prompt file reference: ${{ inputs.prompt_file }}"
+          OPENCODE_PROMPT="Please read and execute the instructions in the file: ${{ inputs.prompt_file }}"
+        else
+          echo "Using inline prompt"
+          OPENCODE_PROMPT="${{ inputs.prompt }}"
+        fi
+        
+        MAX_RETRIES=${{ inputs.max_retries }}
+
+        for i in $(seq 1 "$MAX_RETRIES"); do
+          echo "OpenCode attempt $i/$MAX_RETRIES"
+          if opencode run --model "${{ inputs.model_name }}" "$OPENCODE_PROMPT"; then
+            echo "OpenCode succeeded"
+            exit 0
+          fi
+
+          if [ "$i" -lt "$MAX_RETRIES" ]; then
+            backoff=$((2**i))
+            echo "Attempt $i failed. Retrying in ${backoff}s..."
+            sleep "$backoff"
+          else
+            echo "::error::All $MAX_RETRIES OpenCode attempts failed"
+            exit 1
+          fi
+        done
