@@ -202,3 +202,11 @@ models/
 wandb/
 outputs/
 
+
+# local latex build artifacts
+.research/latex/images/
+.research/latex/**/*.aux
+.research/latex/**/*.log
+.research/latex/**/*.out
+.research/latex/**/*.blg
+.research/latex/**/*.bbl

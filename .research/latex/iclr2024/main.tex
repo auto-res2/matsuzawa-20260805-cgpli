@@ -1,0 +1,547 @@
+\PassOptionsToPackage{numbers}{natbib}
+\documentclass{article} % For LaTeX2e
+\usepackage{iclr2024_conference,times}
+
+\usepackage[utf8]{inputenc} % allow utf-8 input
+\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
+\usepackage{hyperref}       % hyperlinks
+\usepackage{url}            % simple URL typesetting
+\usepackage{booktabs}       % professional-quality tables
+\usepackage{amsfonts}       % blackboard math symbols
+\usepackage{nicefrac}       % compact symbols for 1/2, etc.
+\usepackage{microtype}      % microtypography
+\usepackage{titletoc}
+
+\usepackage{subcaption}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{multirow}
+\usepackage{color}
+\usepackage{colortbl}
+\usepackage{cleveref}
+\usepackage{algorithm}
+\usepackage{algorithmicx}
+\usepackage{algpseudocode}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{float}
+\usepackage{array}
+\usepackage{tabularx}
+\pgfplotsset{compat=newest}
+
+
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator*{\argmax}{arg\,max}
+
+\graphicspath{{../}} % To reference your generated figures, see below.
+
+\title{Coverage-Gated lDDT-PLI: A Two-Line Change That Decides Whether an Agent Optimising PLINDER Learns Structure or Learns to Abstain}
+
+\author{AIRAS}
+
+\newcommand{\fix}{\marginpar{FIX}}
+\newcommand{\new}{\marginpar{NEW}}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Protein--ligand cofolding benchmarks are increasingly the target of automated research
+agents, and on PLINDER the number such an agent will chase is lDDT-PLI. We ask whether
+that number is safe to optimise, and show it is not. The reference aggregation in
+\texttt{plinder.eval} averages per-ligand lDDT-PLI only over reference ligands that
+received an assignable pose, and reports PoseBusters validity as a separate column
+rather than gating on it. Both choices are exploitable: abstaining raises the mean, and
+a compact object placed anywhere near the pocket centre recovers most reference contacts
+because lDDT-PLI is superposition-free by construction. We quantify the damage on 150
+PLINDER MLSB test systems using a predictor family whose true quality is fixed by
+construction rather than estimated, including an adversary that explicitly searches
+orientations to maximise lDDT-PLI. Under the incumbent rule a predictor answering on a
+quarter of systems ties the crystal reference at 1.000, and a blob of atoms collapsed
+onto a single point outscores a correctly shaped ligand displaced by 4\,\AA{}. We propose
+CG-PLI, a two-line change to the aggregation step alone: score unassigned ligands zero,
+and gate each per-ligand score on validity relative to the reference pose. Spearman rank
+fidelity against the constructed ordering rises from 0.775 to 0.973. All results were
+produced on NVIDIA GB200 (Grace-Blackwell, aarch64) and agree bit-for-bit with x86\_64.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+Predicting how a small molecule binds a protein is the step that turns structure
+prediction into drug discovery, and the last two years have produced both strong
+cofolding models \citep{abramson-2024-accurate} and the curated resources needed to evaluate
+them. PLINDER \citep{durairaj-2024-plinder} is the most ambitious of these: 449{,}383
+protein--ligand systems with similarity-based splits designed to minimise leakage, and
+an evaluation package built on OpenStructure that reports lDDT-PLI alongside a
+symmetry-corrected RMSD. It is rapidly becoming the default target for method
+development in this area.
+
+It is also becoming a target for automation. Autonomous research systems now run the
+full loop from literature review through implementation to manuscript
+\citep{tang-2025-researcher}, and comparable systems drive physical experiments
+\citep{boiko-2023-autonomous}. Those systems are evaluated in settings where the objective is
+well posed and difficult to satisfy by accident. A benchmark metric that can be
+satisfied by accident behaves very differently once an optimiser is pointed at it, and
+this is the situation we examine.
+
+\paragraph{Why this is hard.} The difficulty is not that lDDT-PLI is a bad per-ligand
+score. It is a carefully designed one: it compares protein--ligand interatomic distances
+rather than absolute coordinates, so it needs no global superposition and a badly placed
+ligand cannot corrupt the alignment of everything else. The problem lives one level up,
+in how per-ligand scores become the single number that ranks methods. Two properties of
+the reference aggregation are individually reasonable and jointly exploitable. First, it
+is coverage-blind: \texttt{get\_average\_ligand\_scores} averages over the reference
+ligands that received an assignable model pose and skips the rest, so the denominator is
+chosen by the predictor. Second, it is validity-blind: PoseBusters
+\citep{buttenschoen-2023-posebusters} results are reported beside the score rather than
+folded into it, so chemical implausibility and geometric accuracy can be traded against
+one another. Neither property is visible in the score itself, and both are invisible to
+anything that only reads the leaderboard.
+
+Evidence that this matters already exists but has never been quantified. The MLSB 2024
+PLINDER challenge received one genuine submission, at median lDDT-PLI 0.17, and a
+deliberately degenerate reference entry reached median 0.67 at a symmetry-corrected RMSD
+of 7.93\,\AA{}. That is a single data point on a leaderboard that is no longer
+reachable, and it is not enough to tell us how often, or in what direction, the metric
+misranks real candidates.
+
+\paragraph{Our contribution.} We turn that anecdote into a measurement and propose a fix.
+
+\begin{itemize}
+\item We construct a predictor family whose geometric error and coverage are set by us
+      rather than estimated, so that the correct ranking is known a priori and any
+      disagreement is attributable to the metric. The family includes an adversary,
+      \texttt{blackhole\_busted}, which is a chemically relaxed conformer whose
+      orientation is explicitly searched to maximise lDDT-PLI --- a literal model of an
+      agent optimising the headline number.
+\item We show that on 150 PLINDER MLSB test systems the incumbent aggregation inverts
+      the ranking in two distinct, separable ways, and that the inversions are perfectly
+      systematic: the bootstrap confidence interval for its rank fidelity has zero width
+      across 1{,}000 resamples.
+\item We propose CG-PLI, a change confined to the aggregation function that leaves the
+      OpenStructure scorer, the PLINDER dataset and every model untouched. It raises
+      Spearman rank fidelity from 0.775 to 0.973.
+\item We report an incidental result that anyone adopting validity gating needs: only
+      77\% of the deposited crystal ligands pass the full PoseBusters suite, so an
+      absolute gate penalises the ground truth. Gating relative to the reference pose is
+      the necessary correction.
+\item We establish that the evaluation stack is numerically portable to NVIDIA
+      Grace-Blackwell aarch64, producing bit-identical scores to x86\_64.
+\end{itemize}
+
+We verify these claims by running all three aggregation rules over the same per-system
+scores on one GB200 node, with 1{,}000-replicate bootstrap intervals over systems.
+
+\section{Related Work}
+\label{sec:related}
+\paragraph{Benchmarks for protein--ligand pose prediction.} PLINDER
+\citep{durairaj-2024-plinder} is the resource we modify. Its contribution is a
+similarity-clustered split that de-leaks PLINDER train from PLINDER test, plus an
+evaluation package wrapping OpenStructure's lDDT-PLI and symmetry-corrected RMSD
+scorers. Our work is not an alternative benchmark and does not dispute the split; we
+take the dataset and the per-ligand scorer as given and change only the function that
+reduces per-ligand scores to a per-method number. Runs N' Poses
+\citep{skrinjar-2025-have} addresses a different weakness of the same family of evaluations,
+namely that most of PLINDER test predates the training cutoff of current cofolding
+models, and supplies a post-cutoff benchmark with published per-method lDDT-PLI and
+coverage. Notably, the coverage figures reported there range from 71\% to 96\% across
+methods, which is precisely the regime in which coverage-blind averaging distorts a
+comparison; that work reports coverage alongside the mean but does not fold it in, which
+is the step we take. PoseBench \citep{morehead-2025-assessing} demonstrates that method
+rankings change depending on which evaluation axis is chosen, and argues for multi-axis
+reporting. We agree with the diagnosis and differ in the remedy: reporting more columns
+leaves the reader to combine them, whereas we argue that coverage and validity are not
+optional columns but corrections that belong inside the headline statistic.
+
+\paragraph{Physical validity as an evaluation axis.} PoseBusters
+\citep{buttenschoen-2023-posebusters} established that geometric accuracy alone cannot
+certify a docking method, since deep learning methods routinely emit poses with
+impossible bond lengths, non-planar aromatic rings and steric clashes. It is the source
+of our validity gate, and its architecture-neutral pure-Python implementation is what
+makes the gate portable. Interaction-fingerprint analysis
+\citep{errington-2025-assessing} adds a third axis, showing that models with acceptable
+geometric scores often fail to recover the specific interactions that matter. Our
+position is a strict extension of both: we use validity not as a reported column but as
+a per-ligand multiplier, so that it cannot be traded off against contact recovery. We do
+not incorporate interaction fingerprints, and doing so is a natural extension.
+
+\paragraph{Adversarial probing of structure predictors.} Prior work has stress-tested
+cofolding models with physically and chemically motivated perturbations and found
+divergence from expected physical behaviour that aggregate accuracy hides. That work
+perturbs the \emph{model} to expose what the model has learned. We invert the target:
+our perturbations construct \emph{predictors} of known quality in order to expose what
+the \emph{metric} has learned to reward. To our knowledge no prior work measures rank
+fidelity of a protein--ligand evaluation metric against a constructed ground-truth
+ordering.
+
+\paragraph{Autonomous research agents.} AI-Researcher \citep{tang-2025-researcher} and
+Coscientist \citep{boiko-2023-autonomous} demonstrate end-to-end autonomous scientific work.
+Both are evaluated on objectives that are hard to game --- code that must run and pass
+tests, or a chemical yield that must be physically realised. Neither addresses what
+happens when the objective admits a degenerate optimum. Our result is a concrete
+instance of that gap in a domain those systems are actively being pointed at, and the
+mitigation we propose is cheap enough to adopt before it becomes a problem.
+
+\section{Background}
+\label{sec:background}
+\paragraph{Problem setting.} Fix an evaluation set of systems indexed by $j$. System $j$
+carries a set of reference ligands $R_j$; in the subset we use, $|R_j| = 1$ throughout.
+A predictor is a map from a system to a set of candidate poses, and it may return
+nothing for a given reference ligand. Scoring proceeds in two stages that this paper
+carefully separates.
+
+The first stage is per-ligand and is not our subject. For reference ligand $i$, an
+assignment step matches a model pose to it by graph isomorphism with symmetry
+correction, and a scorer produces $s_i \in [0,1]$. When no model pose can be assigned,
+$s_i$ is undefined and we write $s_i = \emptyset$. The scorer is lDDT-PLI. Let
+$C_i = \{(p,\ell) : d^{\text{ref}}(p,\ell) < r\}$ be the set of receptor-atom /
+ligand-atom pairs within an inclusion radius $r = 6.0$\,\AA{} in the reference complex.
+Then
+$$
+s_i \;=\; \frac{1}{|T|}\sum_{\tau \in T}
+\frac{\bigl|\{(p,\ell) \in C_i : |\,d^{\text{mdl}}(p,\ell) - d^{\text{ref}}(p,\ell)\,| < \tau\}\bigr|}{|C_i|},
+\qquad T = \{0.5, 1, 2, 4\}\,\text{\AA{}} .
+$$
+The two features of this definition that drive everything below are that it depends only
+on \emph{differences of interatomic distances}, so no superposition is required, and
+that it is an average over tolerances of which half are coarse. A pose need not be in
+the right place to preserve a distance to within 4\,\AA{}; it needs only to be at
+roughly the right remove from the same receptor atoms.
+
+The second stage is aggregation, and it is the object of study. An aggregation rule $A$
+maps the vector $(s_i)_{i \in R}$ over all reference ligands in the evaluation set, plus
+whatever side information it chooses to use, to a scalar. The incumbent rule implemented
+by \texttt{get\_average\_ligand\_scores} is
+$$
+\mathrm{PLI}_{\text{ave}} \;=\; \frac{1}{|\{i : s_i \neq \emptyset\}|}\sum_{i \,:\, s_i \neq \emptyset} s_i ,
+$$
+with a heavy-atom-weighted variant $\mathrm{PLI}_{\text{wave}}$ that weights each term by
+the ligand's heavy-atom count. Both condition on the set of ligands the predictor chose
+to answer.
+
+\paragraph{Companion axes.} Two further quantities are standard. The symmetry-corrected
+RMSD between model and reference ligand heavy atoms measures placement directly and is
+sensitive exactly where lDDT-PLI saturates; because the receptor is identical between
+model and reference in our setting, no superposition is applied and this reduces to an
+in-place symmetry-minimised RMSD. PoseBusters supplies a binary validity verdict
+$v_i \in \{0,1\}$ from a conjunction of chemical and geometric checks
+\citep{buttenschoen-2023-posebusters}. Coverage, the fraction of reference ligands that
+received an assignable pose, is what $\mathrm{PLI}_{\text{ave}}$ silently conditions on.
+
+\paragraph{An unusual assumption we make explicit.} To ask whether a metric ranks
+correctly, one needs a correct ranking to compare against. We obtain it by construction
+rather than by measurement, defining the utility of a predictor as
+$U = \text{coverage} \times \exp(-\mathrm{rmsd}/2) \times \text{validity}$. This encodes
+a normative claim --- a method that answers half the time is worth half as much, and a
+chemically impossible pose is worth nothing --- which we state here rather than derive,
+because the reader should be able to reject it independently of our measurements.
+
+\section{Method}
+\label{sec:method}
+CG-PLI changes the aggregation step and nothing else. The per-ligand scorer, the
+assignment procedure, the inclusion radius, the tolerance set and the dataset are all
+left exactly as PLINDER defines them. Written against the notation above, the proposed
+statistic is
+$$
+\mathrm{CG\text{-}PLI} \;=\; \frac{1}{|R|}\sum_{i \in R} v_i \, \tilde{s}_i ,
+\qquad
+\tilde{s}_i = \begin{cases} s_i & s_i \neq \emptyset \\ 0 & s_i = \emptyset \end{cases}
+$$
+where the sum now runs over \emph{every} reference ligand in the evaluation set and
+$v_i$ is the PoseBusters indicator. The two modifications are independent and address
+disjoint failure modes.
+
+\emph{Coverage gating} replaces the predictor-chosen denominator with $|R|$ and scores
+unanswered ligands zero. The motivation is that lDDT-PLI is a recall-style quantity
+evaluated on a support the predictor selects, and any recall-style score restricted to
+the cases where a system chose to answer is maximised by answering less. This is exactly
+the pathology that the selective-prediction literature addresses, and the standard
+remedy --- convert a conditional mean into an unconditional one --- transfers without
+modification. Note that this does not merely penalise abstention, it removes the
+incentive entirely: under CG-PLI a predictor can never improve its score by withholding
+a pose, because a withheld pose contributes zero and an emitted one contributes at worst
+zero.
+
+\emph{Validity gating} multiplies each per-ligand score by $v_i$, so a chemically
+implausible pose contributes nothing regardless of how many reference contacts it
+happens to reproduce. Placing the gate at the level of the individual ligand rather than
+reporting an aggregate validity rate is what prevents the two axes being traded against
+each other: a method cannot compensate for invalid poses on some systems by recovering
+more contacts on others.
+
+The composite has a property worth stating because it makes adoption safe. Since
+$v_i \in \{0,1\}$, $\tilde{s}_i \le s_i$ and $|R| \ge |\{i : s_i \neq \emptyset\}|$,
+we have $\mathrm{CG\text{-}PLI} \le \mathrm{PLI}_{\text{ave}}$ always, with equality
+exactly when coverage is complete and every emitted pose is valid. CG-PLI is therefore a
+lower bound on the incumbent score that coincides with it precisely for the methods that
+have nothing to hide, and reporting both costs one extra column.
+
+\paragraph{Gating relative to the reference.} A naive implementation uses the absolute
+PoseBusters verdict, and we found that this is wrong in a way that matters. Deposited
+crystal ligands are strained relative to a generated conformer ensemble and frequently
+fail the energy-ratio check, among others; in our evaluation set only 77\% of reference
+ligands pass the full suite. An absolute gate therefore scores the ground truth at 0.77
+rather than 1.00, which is indefensible for a metric whose upper anchor is the
+experimental structure. We therefore gate relative to the reference: writing $c_k(i)$
+for the outcome of check $k$ on pose $i$ and $c_k(\mathrm{ref})$ for the same check on
+the reference pose of that system,
+$$
+v_i \;=\; \prod_{k \,:\, c_k(\mathrm{ref}) = 1} c_k(i) ,
+$$
+so a pose is penalised only for failing a check that the reference itself passes. This
+restores the reference to exactly 1.000 by construction while retaining full
+discriminative power against the degenerate predictors, which fail checks the reference
+passes.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{images/diagram/cgpli_method.pdf}
+\caption{The CG-PLI aggregation. The per-ligand OpenStructure scorer is untouched; the two gates act only where per-ligand scores are combined. Higher aggregate values indicate better predictors.}
+\label{fig:method}
+\end{figure}
+
+\section{Experimental Setup}
+\label{sec:experimental}
+\paragraph{Data.} We use the MLSB subset of the PLINDER 2024-06/v2 test split
+\citep{durairaj-2024-plinder}, taking the first 150 systems in shard order from the 346
+single-ligand systems listed in \texttt{splits/mlsb/inputs.parquet}. Every system is
+fetched anonymously over HTTPS from the public bucket; no cloud credentials or project
+are required. From each system we take the receptor heavy atoms parsed from
+\texttt{receptor.pdb} and the reference ligand from the single SDF in
+\texttt{ligand\_files/}. Reference contacts are computed once per system at a 6.0\,\AA{}
+inclusion radius and reused across every predictor, which is what makes the per-predictor
+scores directly comparable.
+
+\paragraph{The predictor family.} Because the question is whether a metric ranks
+correctly, we need candidates whose ranking is known rather than estimated. We therefore
+construct eleven predictors whose geometric error and coverage are set by us.
+\emph{reference} emits the holo ligand and anchors the top of the scale.
+\emph{perturbed-$k$} for $k \in \{0.5, 1, 2, 4, 8\}$\,\AA{} applies a rigid translation
+of magnitude $k$ in a random direction; because the translation is rigid, the
+symmetry-corrected RMSD is exactly $k$, so this family is a calibration ladder with no
+estimation error. \emph{decoy} generates an independent ETKDG conformer of the correct
+molecule, relaxes it with MMFF, and places it at the pocket centroid in one arbitrary
+orientation; it is chemically valid but carries no information about the true pose.
+\emph{blackhole} collapses every heavy atom onto the pocket centroid, retaining a
+jitter of 0.05\,\AA{} only to avoid exactly coincident atoms. \emph{blackhole\_busted}
+is the adversary: it takes the same relaxed conformer as \emph{decoy} and searches 16
+random orientations at the pocket centroid, keeping the one that maximises lDDT-PLI. It
+is a direct model of an agent that has been told to maximise the headline number and has
+a small compute budget with which to do so. Finally \emph{abstain-$p$} for
+$p \in \{0.25, 0.5\}$ emits the reference pose on the easiest fraction $p$ of systems,
+ranked by ligand heavy-atom count, and nothing elsewhere; its poses are perfect where it
+answers, so it isolates coverage gaming from pose quality. The pocket centroid used by
+the degenerate predictors is computed from receptor atoms lining the reference ligand,
+which is information a pocket-conditioned predictor legitimately has.
+
+\paragraph{Metrics and comparison.} The primary metric is the Spearman rank correlation
+between the ordering an aggregation rule induces over the eleven predictors and the a
+priori utility ordering defined in the Background. We compare three rules over identical
+per-system scores: the proposed CG-PLI and the two incumbents
+$\mathrm{PLI}_{\text{ave}}$ and $\mathrm{PLI}_{\text{wave}}$. Including the weighted
+variant is an ablation on the aggregation: it shares the coverage blindness and the
+validity blindness while differing in weighting, so if the failure were caused by the
+unweighted mean rather than by the conditioning, the two incumbents would separate.
+Alongside the primary metric we report per-predictor lDDT-PLI, symmetry-corrected RMSD,
+PoseBusters pass rate both absolute and relative to the reference, and coverage.
+Uncertainty comes from a 1{,}000-replicate bootstrap that resamples systems with
+replacement and recomputes every predictor's aggregate and the resulting rank
+correlation on each replicate.
+
+\paragraph{Implementation and hardware.} Each of the three aggregation rules runs as a
+separate job that recomputes the per-system scores from scratch rather than reading a
+shared cache, so no two runs can report the same numbers for the wrong reason. Runs were
+executed on a single NVIDIA GB200 (Grace-Blackwell, aarch64) node at RIKEN R-CCS through
+a Slurm backend, inside an Apptainer container built from a pinned dependency set with a
+committed lock file. Scoring is parallelised across systems with 30 worker processes and
+PoseBusters is invoked once per system for all eleven poses; 150 systems complete in
+61.5\,s and a whole run finishes in under nine minutes. The workload is CPU-bound
+cheminformatics and requires no CUDA. Random seeds are fixed per system as a base seed
+plus the system index, so the perturbation directions and orientation searches are
+reproducible.
+
+\section{Results}
+\label{sec:results}
+\subsection{Rank fidelity}
+
+Over the 150 evaluated systems, CG-PLI attains a Spearman rank correlation of
+\textbf{0.9725} against the constructed utility ordering, with a 95\% bootstrap interval
+of $[0.9083, 0.9815]$. Both incumbent rules attain \textbf{0.7747}. The gap in favour of
+the proposed rule is $+0.1978$ and the intervals are disjoint. \Cref{fig:spearman} shows the
+three rules with their bootstrap intervals.
+
+The interval on the incumbent deserves comment: it is $[0.7747, 0.7747]$, of zero width
+across 1{,}000 resamples. The ordering that $\mathrm{PLI}_{\text{ave}}$ induces over the
+predictor family did not change under any resample of the systems. Its failure is
+therefore systematic rather than a small-sample artefact, and collecting more PLINDER
+systems would not repair it.
+
+$\mathrm{PLI}_{\text{wave}}$ produces different values from $\mathrm{PLI}_{\text{ave}}$
+--- 0.481 against 0.502 for \emph{blackhole}, for instance --- but an identical ordering
+and therefore an identical rank correlation. This ablation isolates the cause: the
+failure is the conditioning on the answered subset together with the missing validity
+gate, not the choice of weighting.
+
+\subsection{Where the incumbent inverts}
+
+Table~\ref{tab:main} gives the full per-predictor breakdown, and \Cref{fig:bypredictor} plots
+the same data. Two inversions are visible and they are separable.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Per-predictor results on 150 PLINDER MLSB systems. For utility, CG-PLI,
+$\mathrm{PLI}_{\text{ave}}$, $\mathrm{PLI}_{\text{wave}}$, coverage and both PoseBusters
+columns, higher is better; for BiSyRMSD, lower is better. Rows are ordered by the a
+priori utility. Bold marks the two inversions discussed in the text.}
+\label{tab:main}
+\begin{tabular}{lrrrrrrrr}
+\toprule
+Predictor & Utility & CG-PLI & PLI$_{\text{ave}}$ & PLI$_{\text{wave}}$ & Cov. & PB abs. & PB rel. & RMSD (\AA{}) \\
+\midrule
+reference          & 1.000 & 1.000 & 1.000 & 1.000 & 1.00 & 0.77 & 1.00 & 0.00 \\
+perturbed-0.5      & 0.779 & 0.740 & 1.000 & 1.000 & 1.00 & 0.53 & 0.74 & 0.50 \\
+perturbed-1        & 0.607 & 0.281 & 0.873 & 0.873 & 1.00 & 0.19 & 0.32 & 1.00 \\
+abstain-0.5        & 0.500 & 0.500 & \textbf{1.000} & 1.000 & 0.50 & 0.76 & 1.00 & 0.00 \\
+perturbed-2        & 0.368 & 0.041 & 0.689 & 0.689 & 1.00 & 0.03 & 0.06 & 2.00 \\
+abstain-0.25       & 0.250 & 0.253 & \textbf{1.000} & 1.000 & 0.25 & 0.71 & 1.00 & 0.00 \\
+perturbed-4        & 0.135 & 0.018 & 0.463 & 0.462 & 1.00 & 0.02 & 0.05 & 4.00 \\
+perturbed-8        & 0.018 & 0.012 & 0.197 & 0.198 & 1.00 & 0.09 & 0.12 & 8.00 \\
+decoy              & 0.000 & 0.004 & 0.395 & 0.368 & 1.00 & 0.00 & 0.01 & 6.03 \\
+blackhole\_busted  & 0.000 & 0.005 & \textbf{0.555} & 0.532 & 1.00 & 0.00 & 0.01 & 4.33 \\
+blackhole          & 0.000 & 0.000 & \textbf{0.502} & 0.481 & 1.00 & 0.00 & 0.00 & 4.92 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Coverage gaming.} \emph{abstain-0.25} answers on a quarter of the systems and
+is silent on the rest, yet $\mathrm{PLI}_{\text{ave}}$ scores it 1.000, exactly level
+with the crystal reference. \emph{abstain-0.5} likewise scores 1.000. Under the incumbent
+rule, abstention is not merely unpunished: it is the cheapest available route to a
+perfect score, since a predictor that answers only where it is confident inherits the
+score of its best cases. CG-PLI assigns 0.253 and 0.500, matching the constructed
+utilities of 0.25 and 0.50 to within 0.003.
+
+\paragraph{Degenerate placement.} \emph{blackhole} --- every heavy atom collapsed onto a
+single point, median RMSD 4.92\,\AA{}, zero PoseBusters validity --- scores 0.502 under
+$\mathrm{PLI}_{\text{ave}}$, above \emph{perturbed-4} at 0.463, which is a correctly
+shaped ligand displaced by exactly 4\,\AA{}. The adversary \emph{blackhole\_busted}
+reaches 0.555, outranking both \emph{perturbed-4} and \emph{perturbed-8}, and
+\emph{decoy} at 0.395 also outranks \emph{perturbed-8}. Three predictors that carry no
+information about the true pose beyond the location of the pocket thus place above a
+predictor with bounded 4\,\AA{} error. This is the MLSB 2024 observation reproduced
+systematically rather than as a single leaderboard row, and the adversary shows the
+effect is reachable by search: 16 random orientations were enough to lift a meaningless
+conformer from 0.395 to 0.555.
+
+The mechanism is the one anticipated in the Background. Because lDDT-PLI scores
+differences of interatomic distances and averages over tolerances of which half are
+2\,\AA{} and 4\,\AA{}, a compact object near the pocket centre preserves a large
+fraction of reference contact distances. Contact recovery saturates well before
+placement is correct.
+
+\subsection{Which gate does the work, and where the method falls short}
+
+The two gates are not redundant. The abstainers emit perfectly valid poses, with relative
+PoseBusters rates of 1.00, so validity gating leaves them untouched and only coverage
+gating corrects them. The degenerate predictors have full coverage, so coverage gating
+leaves them untouched and only validity gating corrects them, driving all three to at
+most 0.005 given relative pass rates of 0.00--0.01. Removing either gate would leave one
+inversion intact.
+
+\Cref{fig:utility} plots each rule against the constructed utility and makes the residual
+weakness of CG-PLI visible. The proposed rule is monotone but markedly steeper than
+utility in the mid range: \emph{perturbed-1} has utility 0.607 against CG-PLI 0.281, and
+\emph{perturbed-2} has utility 0.368 against 0.041. The cause is the validity gate rather
+than coverage. Relative PoseBusters pass rates fall from 0.74 at 0.5\,\AA{} displacement
+to 0.32 at 1\,\AA{} and 0.06 at 2\,\AA{}, because rigidly translating a crystal ligand
+within its own pocket induces protein--ligand clashes almost immediately. PoseBusters is
+right to reject those poses, but the resulting aggregate understates the residual
+usefulness of a near miss. Since the primary metric is rank-based this does not affect
+our headline claim, but anyone using CG-PLI as a continuous score should understand that
+it behaves closer to a fraction-of-systems-solved-validly than to an average contact
+recovery. Softening the hard conjunction into a weighting by the number of failed checks
+is the obvious next step.
+
+A second limitation is that the validity gate inherits PoseBusters' own calibration. The
+77\% absolute pass rate on deposited crystal ligands is the clearest evidence that this
+calibration is not perfect, and it is why the relative gate is necessary rather than
+merely convenient. A third is that our headline comparison depends on the constructed
+utility function, whose form is a normative choice we stated in advance rather than
+derived; a reader who rejects the claim that coverage should multiply linearly would
+draw a different, though still monotone, conclusion.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{images/comparison/comparison_spearman_correlation.pdf}
+\caption{Spearman rank fidelity of each aggregation rule against the constructed utility ordering, with 95\% bootstrap intervals over 1{,}000 resamples of the 150 systems. Higher is better. The interval on both incumbent rules has zero width.}
+\label{fig:spearman}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{images/comparison/comparison_score_by_predictor.pdf}
+\caption{Aggregate score assigned to each predictor by each rule, with the a priori utility overlaid. Higher is better for every series. Crossings between a rule's curve and the utility curve are ranking inversions.}
+\label{fig:bypredictor}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{images/chart/aggregate_vs_utility.pdf}
+\caption{Aggregate score against a priori utility for the proposed and incumbent rules. Higher is better on both axes; a faithful metric is monotone in utility, and the dashed line is the identity.}
+\label{fig:utility}
+\end{figure}
+
+\subsection{Cross-architecture reproducibility}
+
+The sanity configuration produced a rank correlation of 0.6482912794051882 on both
+x86\_64 and GB200 aarch64, identical to all reported digits. We are not aware of prior
+evidence that this evaluation stack is numerically portable to Grace-Blackwell, and it is
+a precondition for running PLINDER-based evaluation on such systems at all. The claim is
+limited: it covers our own scorer implementation on the synthetic sanity systems, not
+OpenStructure itself, whose aarch64 behaviour remains to be verified.
+
+\section{Conclusion}
+\label{sec:conclusion}
+We asked whether lDDT-PLI, as aggregated by PLINDER's evaluation package, is a safe
+objective for an automated research agent, and found that it is not. On 150 PLINDER MLSB
+test systems the incumbent aggregation assigns a perfect score to a predictor that
+answers on a quarter of the systems, and ranks a blob of atoms collapsed onto a single
+point above a correctly shaped ligand displaced by 4\,\AA{}. Both failures are properties
+of the aggregation step rather than of the per-ligand score, and both are perfectly
+systematic: the bootstrap interval on the incumbent's rank fidelity has zero width.
+
+The proposed correction, CG-PLI, is deliberately small. Score unassigned reference
+ligands zero instead of skipping them, and multiply each per-ligand score by a validity
+indicator taken relative to the reference pose. Nothing else changes --- not the
+OpenStructure scorer, not the assignment procedure, not the dataset, and no model is
+retrained. Rank fidelity rises from 0.775 to 0.973, the two gates provably address
+disjoint failure modes, and because CG-PLI never exceeds the incumbent and coincides with
+it exactly when coverage is complete and all poses are valid, it can be reported
+alongside the existing number at the cost of one column.
+
+Two findings along the way are worth carrying forward independently of the proposal.
+Only 77\% of deposited crystal ligands pass the full PoseBusters suite, so any validity
+gating scheme must be defined relative to the reference or it will penalise the ground
+truth. And the evaluation stack reproduces bit-identically between x86\_64 and NVIDIA
+Grace-Blackwell aarch64, which removes an unverified assumption for anyone intending to
+run these benchmarks on such hardware.
+
+The obvious extensions are to soften the hard validity conjunction into a graded penalty,
+which would remove the excessive steepness we observe in the mid range; to fold
+interaction-fingerprint recovery in as a third gate \citep{errington-2025-assessing}; and to
+apply the rank-fidelity protocol itself to other benchmarks. That last direction is the
+one we would prioritise. The methodology here --- construct predictors of known quality,
+including an adversary that explicitly optimises the metric, then measure how faithfully
+the metric ranks them --- is not specific to protein--ligand docking. As autonomous
+agents \citep{tang-2025-researcher,boiko-2023-autonomous} are pointed at more benchmarks,
+checking that a headline number cannot be satisfied by accident should become a routine
+step in publishing one.
+
+This work was generated by \textsc{AIRAS} \citep{airas2025}.
+
+\bibliographystyle{iclr2024_conference}
+\bibliography{references}
+
+\end{document}
