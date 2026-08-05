@@ -196,3 +196,9 @@ models/
 *.log
 *.out
 *.blg
+# local experiment scratch
+.venv/
+.cache/
+wandb/
+outputs/
+.research/results/

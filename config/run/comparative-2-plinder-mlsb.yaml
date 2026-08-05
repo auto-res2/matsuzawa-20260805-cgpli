@@ -1,0 +1,11 @@
+# Baseline: the heavy-atom-weighted variant plinder.eval also emits.
+run_id: comparative-2-plinder-mlsb
+method: PLI_wave
+method_type: comparative-2
+aggregation: pli_wave
+dataset: plinder-mlsb
+description: >-
+  Weight each per-ligand lDDT-PLI by the ligand's heavy-atom count before
+  averaging over the assigned subset. Shares PLI_ave's coverage blindness and
+  validity blindness, so it isolates whether the weighting scheme rather than
+  the conditioning is responsible for any ranking failure.

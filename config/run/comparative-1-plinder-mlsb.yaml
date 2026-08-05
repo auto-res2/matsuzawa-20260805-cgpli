@@ -1,0 +1,11 @@
+# Baseline: the incumbent plinder.eval aggregation.
+run_id: comparative-1-plinder-mlsb
+method: PLI_ave
+method_type: comparative-1
+aggregation: pli_ave
+dataset: plinder-mlsb
+description: >-
+  plinder.eval get_average_ligand_scores: average per-ligand lDDT-PLI over
+  only the reference ligands that received an assignable pose, skipping the
+  rest, and treat PoseBusters validity as a separate report rather than a
+  gate. This is the number current PLINDER-derived leaderboards show.

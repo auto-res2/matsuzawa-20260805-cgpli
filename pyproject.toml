@@ -1,1 +1,31 @@
-# Please list the required python packages.
+[project]
+name = "cgpli"
+version = "0.1.0"
+description = "Coverage-gated, validity-gated PLI: is lDDT-PLI safe for an agent to optimize?"
+requires-python = ">=3.11,<3.12"
+
+# Every dependency is pinned exactly and uv.lock is committed. This is
+# deliberate: the runner rebuilds the Dockerfile from intent, and an
+# unpinned dependency invites it to resolve a version with no aarch64
+# wheel. All of the binary packages below were checked to publish
+# cp311 manylinux aarch64 wheels.
+dependencies = [
+    "hydra-core==1.3.2",
+    "omegaconf==2.3.0",
+    "wandb==0.19.11",
+    "numpy==2.2.6",
+    "scipy==1.15.3",
+    "pandas==2.2.3",
+    "pyarrow==19.0.1",
+    "requests==2.32.3",
+    "rdkit==2024.9.6",
+    "posebusters==0.3.1",
+    "gemmi==0.7.5",
+    "matplotlib==3.10.1",
+]
+
+# src/ is imported as a namespace package straight from the repo root, which
+# is where the CLI contract runs from. Building and installing the project
+# itself would shadow that, so uv is told not to.
+[tool.uv]
+package = false

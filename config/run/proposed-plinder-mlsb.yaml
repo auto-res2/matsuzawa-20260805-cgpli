@@ -1,0 +1,10 @@
+# Proposed method: CG-PLI, coverage-gated and validity-gated aggregation.
+run_id: proposed-plinder-mlsb
+method: CG-PLI
+method_type: proposed
+aggregation: cg_pli
+dataset: plinder-mlsb
+description: >-
+  Aggregate per-ligand lDDT-PLI over ALL reference ligands, scoring
+  unassigned ones as zero, and multiply each per-ligand score by its binary
+  PoseBusters validity indicator.

@@ -1,18 +1,37 @@
-# Main configuration for Hydra
-# This file will be populated by AI code generator based on experimental design
+# Shared Hydra defaults. Per-run settings live in config/run/*.yaml and are
+# selected with `run=<run_id>` on the command line.
 
 defaults:
   - _self_
   - run: ???  # loads from config/run/, accessible as 'run=' in CLI
 
-# Execution mode: main, sanity, or pilot
-mode: main
+# Execution mode: sanity, pilot, or full
+mode: full
 
 # Results output directory
 results_dir: .research/results
 
-# WandB configuration (will be set by AI agent)
 wandb:
-  entity: ???
-  project: ???
+  entity: airas
+  project: cgpli-plinder
   mode: online
+
+experiment:
+  seed: 42
+  cache_dir: .cache
+
+  # Evaluation-set size per mode. sanity is synthetic and needs no network;
+  # pilot and full pull real PLINDER systems from the public bucket.
+  n_systems_sanity: 4
+  n_systems_pilot: 20
+  n_systems_full: 346
+
+  # Orientation search budget for the blackhole_busted adversary. This is the
+  # predictor that actively maximises lDDT-PLI, so the budget is how hard the
+  # adversary is allowed to try.
+  n_orientations: 16
+
+  # PoseBusters supplies the validity gate. Disable only for debugging.
+  posebusters: true
+
+  n_bootstrap: 1000
