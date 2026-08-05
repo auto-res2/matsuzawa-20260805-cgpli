@@ -1,0 +1,282 @@
+name: "Run Parameter Tuning (run)"
+run-name: "🤖 Parameter Tuning run"
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: 'Branch name (e.g., main)'
+        required: true
+        default: 'main'
+      repro_id:
+        description: 'Reproduction ID (directory name under .reproduction/)'
+        required: true
+      repo_url:
+        description: "GitHub URL of the paper's implementation repository (same as the reproduction)"
+        required: false
+        default: ''
+      n_trials:
+        description: 'Optuna trials (empty: use optuna.n_trials from the config, default 20)'
+        required: false
+        default: ''
+      runner_label:
+        description: 'Runner label (e.g., ["ubuntu-latest"], ["self-hosted", "gpu-runner"])'
+        required: true
+        default: '["ubuntu-latest"]'
+
+permissions:
+  id-token: write
+  contents: write
+  actions: write
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  REPRO_DIR: .reproduction/${{ github.event.inputs.repro_id }}
+  RESULTS_DIR: .reproduction/${{ github.event.inputs.repro_id }}/tuning
+  IMAGE_TAG: repro-${{ github.event.inputs.repro_id }}
+
+jobs:
+  tune:
+    name: Run Tuning
+    runs-on: ${{ fromJSON(github.event.inputs.runner_label) }}
+    timeout-minutes: 600
+
+    env:
+      BRANCH_NAME: ${{ github.event.inputs.branch_name }}
+      REPO_URL: ${{ github.event.inputs.repo_url }}
+      N_TRIALS: ${{ github.event.inputs.n_trials }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      LANGFUSE_BASE_URL: ${{ secrets.LANGFUSE_BASE_URL }}
+      LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+      LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+
+    steps:
+      # The checkout restores the reproduction (<repro_dir>/config/ + <repro_dir>/src/ +
+      # <repro_dir>/results/result.json), which run_paper_reproduction_run.yml committed to this branch.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch_name }}
+
+      - name: Validate reproduction code
+        run: |
+          set -eu
+          if [ ! -f "$REPRO_DIR/src/main.py" ] || [ ! -f "$REPRO_DIR/config/config.yaml" ] || [ ! -f "$REPRO_DIR/results/result.json" ]; then
+            echo "::error::$REPRO_DIR/src/main.py, $REPRO_DIR/config/config.yaml, or $REPRO_DIR/results/result.json is missing on this branch. The reproduction run must have completed with this repro_id first."
+            exit 1
+          fi
+          if [ ! -f ".github/scripts/paper_reproduction/tune_driver.py" ]; then
+            echo "::error::.github/scripts/paper_reproduction/tune_driver.py is missing."
+            exit 1
+          fi
+
+      # <repro_dir>/repo is gitignored, so it must be re-cloned here.
+      - name: Re-clone target paper repository
+        if: github.event.inputs.repo_url != ''
+        run: |
+          set -eu
+          git clone --depth 1 -- "$REPO_URL" "$REPRO_DIR/repo"
+
+      - name: Check Docker and Dockerfile availability
+        id: check-docker
+        run: |
+          has_docker=false
+          has_dockerfile=false
+
+          if docker info > /dev/null 2>&1; then
+            has_docker=true
+            echo "Docker is available"
+          else
+            echo "Docker is not available, will use native execution"
+          fi
+
+          if [ -f "$REPRO_DIR/Dockerfile" ]; then
+            has_dockerfile=true
+            echo "Dockerfile found in $REPRO_DIR"
+          else
+            echo "Dockerfile not found in $REPRO_DIR"
+          fi
+
+          echo "has_docker=$has_docker" >> "$GITHUB_OUTPUT"
+          echo "has_dockerfile=$has_dockerfile" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare tuning directory
+        run: mkdir -p "$RESULTS_DIR"
+
+      - name: Build Docker image
+        if: steps.check-docker.outputs.has_docker == 'true' && steps.check-docker.outputs.has_dockerfile == 'true'
+        id: build-docker
+        continue-on-error: true
+        uses: Wandalen/wretry.action@v3
+        with:
+          attempt_limit: 3
+          attempt_delay: 30000
+          command: |
+            (
+              set -e
+              echo "=== [DOCKER BUILD] Start at $(date -u) ==="
+              docker build -t "airas-repro:${IMAGE_TAG,,}" "$REPRO_DIR"
+              echo "=== [DOCKER BUILD] Success at $(date -u) ==="
+            ) 2>&1 | tee -a "$RESULTS_DIR/docker_build.log"
+
+            exit_status=${PIPESTATUS[0]}
+            if [ $exit_status -ne 0 ]; then
+              echo "::warning::Docker build failed (exit $exit_status), will fall back to native execution"
+              cat "$RESULTS_DIR/docker_build.log" >> "$RESULTS_DIR/run.log"
+              exit $exit_status
+            fi
+
+      - name: Install uv (fallback if no Docker)
+        if: steps.check-docker.outputs.has_docker == 'false' || steps.check-docker.outputs.has_dockerfile == 'false' || steps.build-docker.outcome != 'success'
+        uses: Wandalen/wretry.action@v3
+        with:
+          action: astral-sh/setup-uv@v6
+          with: |
+            python-version: "3.11"
+          attempt_limit: 3
+          attempt_delay: 30000
+
+      # Bind-mount the whole workspace so tune_driver.py (.github/scripts) and trial outputs are visible.
+      # Optuna/matplotlib are installed at run time (not part of the reproduction Dockerfile).
+      - name: Run tuning (Docker)
+        if: steps.check-docker.outputs.has_docker == 'true' && steps.check-docker.outputs.has_dockerfile == 'true' && steps.build-docker.outcome == 'success'
+        id: run-docker
+        continue-on-error: true
+        uses: Wandalen/wretry.action@v3
+        with:
+          attempt_limit: 2
+          attempt_delay: 60000
+          command: |
+            trap 'sleep 1' EXIT
+
+            GPU_FLAGS=""
+            if nvidia-smi > /dev/null 2>&1; then
+              echo "GPU detected, enabling GPU support"
+              GPU_FLAGS="--gpus all"
+            else
+              echo "No GPU detected, running without GPU support"
+            fi
+
+            N_TRIALS_ARG=""
+            if [ -n "${N_TRIALS:-}" ]; then N_TRIALS_ARG="--n-trials $N_TRIALS"; fi
+
+            docker run --rm $GPU_FLAGS \
+              -v "$(pwd):/workspace" \
+              -w /workspace \
+              -e ANTHROPIC_API_KEY \
+              -e AWS_BEARER_TOKEN_BEDROCK \
+              -e GEMINI_API_KEY \
+              -e HF_TOKEN \
+              -e LANGFUSE_BASE_URL \
+              -e LANGFUSE_PUBLIC_KEY \
+              -e LANGFUSE_SECRET_KEY \
+              -e OPENAI_API_KEY \
+              -e OPENROUTER_API_KEY \
+              -e WANDB_API_KEY \
+              "airas-repro:${IMAGE_TAG,,}" \
+              bash -c '
+                set -e
+                set -o pipefail
+                pip install -q optuna matplotlib pyyaml
+                echo "=== [TUNING] Start at $(date -u) ==="
+                python .github/scripts/paper_reproduction/tune_driver.py \
+                  --original-run-dir "'"$REPRO_DIR"'" \
+                  --tune-output-dir "'"$RESULTS_DIR"'" \
+                  --python python \
+                  '"$N_TRIALS_ARG"'
+                echo "=== [TUNING] PASSED at $(date -u) ==="
+              ' > >(tee -a "$RESULTS_DIR/run.log") 2>&1
+
+      - name: Run tuning (native)
+        if: steps.check-docker.outputs.has_docker == 'false' || steps.check-docker.outputs.has_dockerfile == 'false' || steps.build-docker.outcome != 'success'
+        id: run-native
+        continue-on-error: true
+        uses: Wandalen/wretry.action@v3
+        with:
+          attempt_limit: 2
+          attempt_delay: 60000
+          command: |
+            trap 'sleep 1' EXIT
+            (
+              set -e
+              set -o pipefail
+              uv venv .venv
+              uv pip install --no-cache --python .venv/bin/python hydra-core optuna matplotlib pyyaml
+              if [ -f "$REPRO_DIR/repo/requirements.txt" ]; then
+                uv pip install --no-cache --python .venv/bin/python -r "$REPRO_DIR/repo/requirements.txt" || true
+              fi
+              uv pip install --no-cache --python .venv/bin/python -e "$REPRO_DIR/repo" 2>/dev/null || true
+              if [ -f "$REPRO_DIR/requirements.txt" ]; then
+                uv pip install --no-cache --python .venv/bin/python -r "$REPRO_DIR/requirements.txt" || true
+              fi
+              N_TRIALS_ARG=""
+              if [ -n "${N_TRIALS:-}" ]; then N_TRIALS_ARG="--n-trials $N_TRIALS"; fi
+              echo "=== [TUNING] Start at $(date -u) ==="
+              .venv/bin/python .github/scripts/paper_reproduction/tune_driver.py \
+                --original-run-dir "$REPRO_DIR" \
+                --tune-output-dir "$RESULTS_DIR" \
+                --python "$(pwd)/.venv/bin/python" \
+                $N_TRIALS_ARG
+              echo "=== [TUNING] PASSED at $(date -u) ==="
+            ) > >(tee -a "$RESULTS_DIR/run.log") 2>&1
+
+      - name: Determine tuning outcome
+        id: tuning-outcome
+        if: always()
+        run: |
+          set -eu
+          outcome="${{ steps.run-docker.outcome }}${{ steps.run-native.outcome }}"
+          STATUS="passed"
+          if [[ "$outcome" != *"success"* ]] || [ ! -f "$RESULTS_DIR/result.json" ] || [ ! -f "$RESULTS_DIR/tuning_figure.png" ]; then
+            STATUS="failed"
+          fi
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+
+      # Backup/debug copy; the authoritative copy for fetch_parameter_tuning_results is the git commit.
+      - name: Upload results
+        if: always()
+        uses: Wandalen/wretry.action@v3
+        with:
+          action: actions/upload-artifact@v4
+          with: |
+            name: paper-tuning-${{ github.event.inputs.repro_id }}-${{ github.run_id }}
+            path: ${{ env.RESULTS_DIR }}
+            if-no-files-found: warn
+          attempt_limit: 3
+          attempt_delay: 30000
+
+      - name: Commit and push results
+        if: always()
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+          git add -A -- "$RESULTS_DIR"
+
+          if ! git diff --staged --quiet; then
+            git commit -m "[CI] Parameter tuning run results"
+            git checkout -- .
+            for i in {1..5}; do
+              git pull --rebase -X theirs origin "$BRANCH_NAME"
+              git push origin "HEAD:$BRANCH_NAME" && break
+              echo "Push failed on attempt $i. Retrying in $((2**i)) seconds..."
+              sleep $((2**i))
+            done
+          else
+            echo "No results to commit."
+          fi
+
+      - name: Fail job if tuning did not produce results
+        if: steps.tuning-outcome.outputs.status == 'failed'
+        run: |
+          echo "::error::tune_driver.py did not produce result.json + tuning_figure.png. See $RESULTS_DIR/run.log."
+          exit 1
