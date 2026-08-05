@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
+import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import hydra
@@ -82,21 +85,35 @@ class ValidityChecker:
             self._busters[config] = PoseBusters(config=config)
         return self._busters[config]
 
-    def check(self, mol: Chem.Mol, receptor_pdb: Path | None) -> tuple[bool, dict]:
+    def check_batch(
+        self, mols: list[Chem.Mol], receptor_pdb: Path | None
+    ) -> list[tuple[bool, dict]]:
+        """Check every pose for one system in a single call.
+
+        Batching matters: in "dock" mode PoseBusters re-parses the receptor
+        for each call, and eleven separate calls per system made the run
+        exceed the executor's activity heartbeat timeout. One call per system
+        parses the receptor once.
+        """
         if not self.enabled:
-            return True, {}
+            return [(True, {}) for _ in mols]
         config = "dock" if receptor_pdb is not None else "mol"
         try:
             buster = self._buster(config)
             kwargs = {"mol_cond": str(receptor_pdb)} if receptor_pdb else {}
-            df = buster.bust([mol], **kwargs)
-            row = df.iloc[0].to_dict()
-            checks = {k: bool(v) for k, v in row.items() if isinstance(v, (bool, np.bool_))}
-            return (all(checks.values()) if checks else False), checks
+            df = buster.bust(list(mols), **kwargs)
+            out: list[tuple[bool, dict]] = []
+            for i in range(len(mols)):
+                row = df.iloc[i].to_dict()
+                checks = {
+                    k: bool(v) for k, v in row.items() if isinstance(v, (bool, np.bool_))
+                }
+                out.append(((all(checks.values()) if checks else False), checks))
+            return out
         except Exception as exc:  # noqa: BLE001
             self.errors += 1
             logger.warning("posebusters failed: %s", exc)
-            return False, {}
+            return [(False, {}) for _ in mols]
 
 
 # --------------------------------------------------------------------------
@@ -158,65 +175,118 @@ def rank_fidelity(values: dict[str, float]) -> float:
 # --------------------------------------------------------------------------
 # The run
 # --------------------------------------------------------------------------
+_WORKER_CHECKER: ValidityChecker | None = None
+
+
+def _worker_checker(enabled: bool) -> ValidityChecker:
+    """One PoseBusters instance per worker process, built on first use."""
+    global _WORKER_CHECKER
+    if _WORKER_CHECKER is None:
+        _WORKER_CHECKER = ValidityChecker(enabled=enabled)
+    return _WORKER_CHECKER
+
+
+def _score_one_system(payload: tuple) -> list[dict]:
+    """Score every predictor for a single system. Runs in a worker process.
+
+    Scoring is embarrassingly parallel across systems and dominated by
+    PoseBusters, so spreading it over the node's cores is what keeps a full
+    run inside the executor's activity heartbeat timeout.
+    """
+    system, seed, n_orient, pb_enabled = payload
+    checker = _worker_checker(pb_enabled)
+    contacts, ref_d = preprocess.reference_contacts(system)
+    if len(contacts) == 0:
+        return []
+    rng = np.random.default_rng(seed)
+
+    def score_fn(coords: np.ndarray) -> float:
+        return lddt_pli(system.receptor_coords, contacts, ref_d, coords)
+
+    poses = predictors.generate_poses(system, rng, score_fn, n_orientations=n_orient)
+    n_heavy = system.ligand.GetNumAtoms()
+    return _rows_for_system(system, poses, checker, score_fn, n_heavy)
+
+
 def score_all(systems: list, cfg: DictConfig) -> pd.DataFrame:
     """Score every (system, predictor) pair on all three axes."""
-    checker = ValidityChecker(enabled=bool(cfg.experiment.get("posebusters", True)))
+    pb_enabled = bool(cfg.experiment.get("posebusters", True))
     n_orient = int(cfg.experiment.get("n_orientations", 16))
+    seed0 = int(cfg.experiment.get("seed", 42))
+    n_workers = int(cfg.experiment.get("score_workers", 0)) or min(
+        16, max(1, (os.cpu_count() or 2) - 2)
+    )
     rows: list[dict] = []
+    t0 = time.monotonic()
 
-    for idx, system in enumerate(systems):
-        contacts, ref_d = preprocess.reference_contacts(system)
-        if len(contacts) == 0:
-            logger.warning("%s has no reference contacts, skipping", system.system_id)
-            continue
-        rng = np.random.default_rng(int(cfg.experiment.get("seed", 42)) + idx)
-
-        def score_fn(coords: np.ndarray) -> float:
-            return lddt_pli(system.receptor_coords, contacts, ref_d, coords)
-
-        poses = predictors.generate_poses(system, rng, score_fn, n_orientations=n_orient)
-        n_heavy = system.ligand.GetNumAtoms()
-
-        # Check the crystal reference first. Deposited ligands routinely fail
-        # some PoseBusters checks (strained conformers fail the energy-ratio
-        # test in particular), so an absolute validity gate would zero the
-        # ground truth itself. The gate we actually apply is therefore
-        # relative: a pose is gated out only for failing a check that the
-        # reference pose passes. The absolute rate is still recorded, because
-        # how often the reference fails is a result in its own right.
-        ref_valid, ref_checks = checker.check(poses["reference"], system.receptor_pdb)
-
-        for name, mol in poses.items():
-            coords = mol.GetConformer().GetPositions()
-            if name == "reference":
-                valid, checks = ref_valid, ref_checks
-            else:
-                valid, checks = checker.check(mol, system.receptor_pdb)
-            expected = [k for k, v in ref_checks.items() if v]
-            valid_rel = all(checks.get(k, False) for k in expected) if expected else valid
-            rows.append(
-                {
-                    "system_id": system.system_id,
-                    "predictor": name,
-                    "lddt_pli": score_fn(coords),
-                    "bisy_rmsd": symmetry_rmsd(system.ligand, mol),
-                    "pb_valid": valid,
-                    "pb_valid_rel": bool(valid_rel),
-                    "n_heavy_atoms": n_heavy,
-                    "answered": True,
-                    **{f"pb::{k}": v for k, v in checks.items()},
-                }
-            )
-        if (idx + 1) % 20 == 0:
-            logger.info("scored %d/%d systems", idx + 1, len(systems))
+    payloads = [(s, seed0 + i, n_orient, pb_enabled) for i, s in enumerate(systems)]
+    if n_workers > 1 and len(payloads) > 1:
+        logger.info("scoring %d systems across %d workers", len(payloads), n_workers)
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            for done, out in enumerate(pool.map(_score_one_system, payloads), start=1):
+                rows.extend(out)
+                if done % 10 == 0:
+                    logger.info(
+                        "scored %d/%d systems (%.1fs elapsed, %.2fs/system)",
+                        done, len(payloads), time.monotonic() - t0,
+                        (time.monotonic() - t0) / done,
+                    )
+    else:
+        for done, payload in enumerate(payloads, start=1):
+            rows.extend(_score_one_system(payload))
+            if done % 10 == 0:
+                logger.info("scored %d/%d systems", done, len(payloads))
 
     df = pd.DataFrame(rows)
     if df.empty:
         raise RuntimeError("no systems produced any scores")
+    logger.info("scoring finished in %.1fs", time.monotonic() - t0)
+    return _append_abstainers(df)
 
-    # abstain-p reuses the reference pose but answers only on the easiest
-    # fraction of systems, so it isolates coverage gaming from pose quality.
-    ref = df[df.predictor == "reference"].set_index("system_id")
+
+def _rows_for_system(system, poses, checker, score_fn, n_heavy) -> list[dict]:
+    """One row per (system, predictor), on all three reporting axes."""
+    # One PoseBusters call for the whole system. Deposited ligands routinely
+    # fail some checks (strained crystal conformers fail the energy-ratio test
+    # in particular), so an absolute validity gate would zero the ground truth
+    # itself. The gate we apply is therefore relative: a pose is gated out
+    # only for failing a check that the reference pose passes. The absolute
+    # rate is still recorded, because how often the reference fails is a
+    # result in its own right.
+    names = list(poses)
+    verdicts = checker.check_batch([poses[n] for n in names], system.receptor_pdb)
+    by_name = dict(zip(names, verdicts))
+    _, ref_checks = by_name["reference"]
+    expected = [k for k, v in ref_checks.items() if v]
+
+    rows: list[dict] = []
+    for name, mol in poses.items():
+        coords = mol.GetConformer().GetPositions()
+        valid, checks = by_name[name]
+        valid_rel = all(checks.get(k, False) for k in expected) if expected else valid
+        rows.append(
+            {
+                "system_id": system.system_id,
+                "predictor": name,
+                "lddt_pli": score_fn(coords),
+                "bisy_rmsd": symmetry_rmsd(system.ligand, mol),
+                "pb_valid": valid,
+                "pb_valid_rel": bool(valid_rel),
+                "n_heavy_atoms": n_heavy,
+                "answered": True,
+                **{f"pb::{k}": v for k, v in checks.items()},
+            }
+        )
+    return rows
+
+
+def _append_abstainers(df: pd.DataFrame) -> pd.DataFrame:
+    """Derive the abstain-p predictors from the reference rows.
+
+    abstain-p reuses the reference pose but answers only on the easiest
+    fraction of systems, which isolates coverage gaming from pose quality.
+    """
+    ref = df[df.predictor == "reference"].set_index("system_id").sort_index()
     sids = ref.index.tolist()
     difficulty = ref["n_heavy_atoms"].to_numpy()
     extra: list[dict] = []
@@ -273,18 +343,64 @@ def summarise(df: pd.DataFrame, rule: str) -> dict:
     }
 
 
-def bootstrap_spearman(df: pd.DataFrame, rule: str, n_boot: int, seed: int) -> dict:
-    """Percentile CI for the rank fidelity, resampling systems."""
+def _as_columns(df: pd.DataFrame) -> tuple[list[str], dict[str, dict[str, np.ndarray]]]:
+    """Pivot to per-predictor numpy columns aligned on a common system order."""
     sids = sorted(df.system_id.unique())
+    pos = {s: i for i, s in enumerate(sids)}
+    cols: dict[str, dict[str, np.ndarray]] = {}
+    for name, sub in df.groupby("predictor"):
+        idx = np.array([pos[s] for s in sub["system_id"]])
+        n = len(sids)
+        score = np.full(n, np.nan)
+        answered = np.zeros(n, dtype=bool)
+        valid = np.zeros(n, dtype=bool)
+        weight = np.ones(n)
+        score[idx] = pd.to_numeric(sub["lddt_pli"], errors="coerce").to_numpy(dtype=float)
+        answered[idx] = sub["answered"].to_numpy().astype(bool)
+        valid[idx] = sub["pb_valid_rel"].to_numpy().astype(bool)
+        weight[idx] = sub["n_heavy_atoms"].to_numpy(dtype=float)
+        answered &= np.isfinite(score)
+        cols[str(name)] = {
+            "score": score, "answered": answered, "valid": valid, "weight": weight
+        }
+    return sids, cols
+
+
+def _aggregate_fast(rule: str, c: dict[str, np.ndarray], idx: np.ndarray) -> float:
+    s, a, v, w = c["score"][idx], c["answered"][idx], c["valid"][idx], c["weight"][idx]
+    n_ref = idx.size
+    if n_ref == 0:
+        return float("nan")
+    if rule == "pli_ave":
+        return float(np.mean(s[a])) if a.any() else float("nan")
+    if rule == "pli_wave":
+        den = w[a].sum()
+        return float((w[a] * s[a]).sum() / den) if den > 0 else float("nan")
+    if rule == "cg_pli":
+        keep = a & v
+        return float(np.nansum(s[keep]) / n_ref)
+    raise ValueError(rule)
+
+
+def bootstrap_spearman(df: pd.DataFrame, rule: str, n_boot: int, seed: int) -> dict:
+    """Percentile CI for the rank fidelity, resampling systems.
+
+    Works on pivoted numpy columns rather than rebuilding a DataFrame per
+    replicate; the DataFrame version was the dominant cost of a full run.
+    """
+    sids, cols = _as_columns(df)
     if n_boot <= 0 or len(sids) < 3:
         return {}
+    names = [n for n in cols if n in predictors.A_PRIORI_UTILITY]
+    truth = np.array([predictors.A_PRIORI_UTILITY[n] for n in names])
     rng = np.random.default_rng(seed)
-    by_sid = {s: g for s, g in df.groupby("system_id")}
     stats: list[float] = []
     for _ in range(n_boot):
-        pick = rng.choice(len(sids), size=len(sids), replace=True)
-        sample = pd.concat([by_sid[sids[i]] for i in pick], ignore_index=True)
-        stats.append(summarise(sample, rule)["spearman_correlation"])
+        idx = rng.integers(0, len(sids), size=len(sids))
+        got = np.array([_aggregate_fast(rule, cols[n], idx) for n in names])
+        ok = np.isfinite(got)
+        if ok.sum() >= 3:
+            stats.append(float(spearmanr(truth[ok], got[ok]).statistic))
     arr = np.asarray([s for s in stats if np.isfinite(s)])
     if arr.size == 0:
         return {}

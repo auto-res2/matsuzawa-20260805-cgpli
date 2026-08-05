@@ -24,7 +24,14 @@ experiment:
   # pilot and full pull real PLINDER systems from the public bucket.
   n_systems_sanity: 4
   n_systems_pilot: 20
-  n_systems_full: 346
+  # 150 systems, not the full 346. The executor kills a run at roughly 30
+  # minutes with "activity Heartbeat timeout", and 150 is what fits with
+  # margin. It is also the size the original brief asked for (150-200).
+  n_systems_full: 150
+
+  # Shard downloads are latency-bound; fetching them serially took over half
+  # an hour on its own and tripped the heartbeat timeout.
+  download_workers: 12
 
   # Orientation search budget for the blackhole_busted adversary. This is the
   # predictor that actively maximises lDDT-PLI, so the budget is how hard the

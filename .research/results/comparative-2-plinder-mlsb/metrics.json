@@ -1,0 +1,121 @@
+{
+  "rule": "pli_wave",
+  "spearman_correlation": 0.6526468967070211,
+  "per_predictor": {
+    "reference": {
+      "value": 1.0,
+      "pli_ave": 1.0,
+      "coverage": 1.0,
+      "pb_valid_rate": 1.0,
+      "pb_valid_rel_rate": 1.0,
+      "median_bisy_rmsd": 0.0,
+      "n_systems": 4
+    },
+    "perturbed-0.5": {
+      "value": 1.0,
+      "pli_ave": 1.0,
+      "coverage": 1.0,
+      "pb_valid_rate": 1.0,
+      "pb_valid_rel_rate": 1.0,
+      "median_bisy_rmsd": 0.5,
+      "n_systems": 4
+    },
+    "perturbed-1": {
+      "value": 0.881520121244845,
+      "pli_ave": 0.8815201212448451,
+      "coverage": 1.0,
+      "pb_valid_rate": 1.0,
+      "pb_valid_rel_rate": 1.0,
+      "median_bisy_rmsd": 1.0,
+      "n_systems": 4
+    },
+    "perturbed-2": {
+      "value": 0.6784758559507388,
+      "pli_ave": 0.6784758559507388,
+      "coverage": 1.0,
+      "pb_valid_rate": 1.0,
+      "pb_valid_rel_rate": 1.0,
+      "median_bisy_rmsd": 2.0,
+      "n_systems": 4
+    },
+    "perturbed-4": {
+      "value": 0.4844065103779516,
+      "pli_ave": 0.4844065103779517,
+      "coverage": 1.0,
+      "pb_valid_rate": 1.0,
+      "pb_valid_rel_rate": 1.0,
+      "median_bisy_rmsd": 4.0,
+      "n_systems": 4
+    },
+    "perturbed-8": {
+      "value": 0.20182893313019143,
+      "pli_ave": 0.20182893313019143,
+      "coverage": 1.0,
+      "pb_valid_rate": 1.0,
+      "pb_valid_rel_rate": 1.0,
+      "median_bisy_rmsd": 8.0,
+      "n_systems": 4
+    },
+    "decoy": {
+      "value": 0.577188393217338,
+      "pli_ave": 0.577188393217338,
+      "coverage": 1.0,
+      "pb_valid_rate": 1.0,
+      "pb_valid_rel_rate": 1.0,
+      "median_bisy_rmsd": 3.3961381242901556,
+      "n_systems": 4
+    },
+    "blackhole_busted": {
+      "value": 0.7564507105556034,
+      "pli_ave": 0.7564507105556033,
+      "coverage": 1.0,
+      "pb_valid_rate": 1.0,
+      "pb_valid_rel_rate": 1.0,
+      "median_bisy_rmsd": 1.943051552978574,
+      "n_systems": 4
+    },
+    "blackhole": {
+      "value": 0.7014327533580164,
+      "pli_ave": 0.7014327533580162,
+      "coverage": 1.0,
+      "pb_valid_rate": 0.0,
+      "pb_valid_rel_rate": 0.0,
+      "median_bisy_rmsd": 2.765635786731268,
+      "n_systems": 4
+    },
+    "abstain-0.25": {
+      "value": 1.0,
+      "pli_ave": 1.0,
+      "coverage": 0.25,
+      "pb_valid_rate": 1.0,
+      "pb_valid_rel_rate": 1.0,
+      "median_bisy_rmsd": 0.0,
+      "n_systems": 4
+    },
+    "abstain-0.5": {
+      "value": 1.0,
+      "pli_ave": 1.0,
+      "coverage": 0.5,
+      "pb_valid_rate": 1.0,
+      "pb_valid_rel_rate": 1.0,
+      "median_bisy_rmsd": 0.0,
+      "n_systems": 4
+    }
+  },
+  "a_priori_utility": {
+    "reference": 1.0,
+    "perturbed-0.5": 0.7788007830714049,
+    "perturbed-1": 0.6065306597126334,
+    "perturbed-2": 0.36787944117144233,
+    "perturbed-4": 0.1353352832366127,
+    "perturbed-8": 0.01831563888873418,
+    "abstain-0.25": 0.25,
+    "abstain-0.5": 0.5,
+    "decoy": 0.0,
+    "blackhole_busted": 0.0,
+    "blackhole": 0.0
+  },
+  "mode": "sanity",
+  "run_id": "comparative-2-plinder-mlsb",
+  "n_systems": 4
+}

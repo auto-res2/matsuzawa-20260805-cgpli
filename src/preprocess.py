@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -213,10 +214,36 @@ def build_systems(mode: str, data_cfg: dict, cache_dir: Path) -> list[System]:
 
     # Fetch in shard order so each zip is downloaded once and reused.
     wanted.sort(key=lambda s: (_shard_for(s), s))
+    wanted = wanted[: int(n)]
+
+    # Prefetch the shards concurrently. Serial fetching of the ~7 s shards was
+    # taking over half an hour for the full subset, which alone exceeded the
+    # executor's activity heartbeat timeout; the downloads are latency-bound,
+    # not bandwidth-bound, so a modest pool collapses that to a few minutes.
+    shards = sorted({_shard_for(s) for s in wanted})
+    logger.info("prefetching %d shards for %d systems", len(shards), len(wanted))
+    workers = int(cfg_workers) if (cfg_workers := data_cfg.get("download_workers", 12)) else 12
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(
+                _download,
+                f"{PLINDER_BASE}/systems/{sh}.zip",
+                _cache_path(cache_dir, f"plinder/systems/{sh}.zip"),
+            ): sh
+            for sh in shards
+        }
+        done = 0
+        for fut in as_completed(futures):
+            done += 1
+            try:
+                fut.result()
+            except Exception as exc:  # noqa: BLE001 - a missing shard is survivable
+                logger.warning("shard %s failed: %s", futures[fut], exc)
+            if done % 25 == 0:
+                logger.info("prefetched %d/%d shards", done, len(shards))
+
     systems: list[System] = []
     for sid in wanted:
-        if len(systems) >= n:
-            break
         s = fetch_system(sid, cache_dir)
         if s is not None:
             systems.append(s)

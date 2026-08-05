@@ -1,0 +1,124 @@
+{
+  "rule": "cg_pli",
+  "spearman_correlation": 0.9672320915226357,
+  "per_predictor": {
+    "reference": {
+      "value": 1.0,
+      "pli_ave": 1.0,
+      "coverage": 1.0,
+      "pb_valid_rate": 0.6666666666666666,
+      "pb_valid_rel_rate": 1.0,
+      "median_bisy_rmsd": 0.0,
+      "n_systems": 12
+    },
+    "perturbed-0.5": {
+      "value": 0.5833333333333334,
+      "pli_ave": 1.0,
+      "coverage": 1.0,
+      "pb_valid_rate": 0.3333333333333333,
+      "pb_valid_rel_rate": 0.5833333333333334,
+      "median_bisy_rmsd": 0.4999999999999998,
+      "n_systems": 12
+    },
+    "perturbed-1": {
+      "value": 0.29754522525871135,
+      "pli_ave": 0.8789052421865003,
+      "coverage": 1.0,
+      "pb_valid_rate": 0.25,
+      "pb_valid_rel_rate": 0.3333333333333333,
+      "median_bisy_rmsd": 0.9999999999999998,
+      "n_systems": 12
+    },
+    "perturbed-2": {
+      "value": 0.050428348909657326,
+      "pli_ave": 0.6937997373332513,
+      "coverage": 1.0,
+      "pb_valid_rate": 0.08333333333333333,
+      "pb_valid_rel_rate": 0.08333333333333333,
+      "median_bisy_rmsd": 2.0,
+      "n_systems": 12
+    },
+    "perturbed-4": {
+      "value": 0.025506230529595015,
+      "pli_ave": 0.45479221385097923,
+      "coverage": 1.0,
+      "pb_valid_rate": 0.08333333333333333,
+      "pb_valid_rel_rate": 0.08333333333333333,
+      "median_bisy_rmsd": 4.0,
+      "n_systems": 12
+    },
+    "perturbed-8": {
+      "value": 0.0,
+      "pli_ave": 0.16377646627786055,
+      "coverage": 1.0,
+      "pb_valid_rate": 0.0,
+      "pb_valid_rel_rate": 0.0,
+      "median_bisy_rmsd": 8.0,
+      "n_systems": 12
+    },
+    "decoy": {
+      "value": 0.0,
+      "pli_ave": 0.38636889534372704,
+      "coverage": 1.0,
+      "pb_valid_rate": 0.0,
+      "pb_valid_rel_rate": 0.0,
+      "median_bisy_rmsd": 6.628095195446031,
+      "n_systems": 12
+    },
+    "blackhole_busted": {
+      "value": 0.0,
+      "pli_ave": 0.5746705240320048,
+      "coverage": 1.0,
+      "pb_valid_rate": 0.0,
+      "pb_valid_rel_rate": 0.0,
+      "median_bisy_rmsd": 4.155220362964004,
+      "n_systems": 12
+    },
+    "blackhole": {
+      "value": 0.0,
+      "pli_ave": 0.5003043228864054,
+      "coverage": 1.0,
+      "pb_valid_rate": 0.0,
+      "pb_valid_rel_rate": 0.0,
+      "median_bisy_rmsd": 5.022970368286899,
+      "n_systems": 12
+    },
+    "abstain-0.25": {
+      "value": 0.25,
+      "pli_ave": 1.0,
+      "coverage": 0.25,
+      "pb_valid_rate": 0.6666666666666666,
+      "pb_valid_rel_rate": 1.0,
+      "median_bisy_rmsd": 0.0,
+      "n_systems": 12
+    },
+    "abstain-0.5": {
+      "value": 0.5,
+      "pli_ave": 1.0,
+      "coverage": 0.5,
+      "pb_valid_rate": 0.6666666666666666,
+      "pb_valid_rel_rate": 1.0,
+      "median_bisy_rmsd": 0.0,
+      "n_systems": 12
+    }
+  },
+  "a_priori_utility": {
+    "reference": 1.0,
+    "perturbed-0.5": 0.7788007830714049,
+    "perturbed-1": 0.6065306597126334,
+    "perturbed-2": 0.36787944117144233,
+    "perturbed-4": 0.1353352832366127,
+    "perturbed-8": 0.01831563888873418,
+    "abstain-0.25": 0.25,
+    "abstain-0.5": 0.5,
+    "decoy": 0.0,
+    "blackhole_busted": 0.0,
+    "blackhole": 0.0
+  },
+  "spearman_ci_low": 0.8427009716003844,
+  "spearman_ci_high": 0.9766226943529523,
+  "n_bootstrap": 1000,
+  "mode": "pilot",
+  "run_id": "proposed-plinder-mlsb",
+  "n_systems": 12
+}
