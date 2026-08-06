@@ -538,7 +538,9 @@ def probe_environment() -> dict:
 def run(cfg: DictConfig) -> dict:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     mode = str(cfg.mode)
-    if bool(cfg.experiment.get("probe_only", False)):
+    if bool(cfg.run.get("probe_only", False)) or bool(
+        cfg.experiment.get("probe_only", False)
+    ):
         probe_environment()
         print("SANITY_VALIDATION: PASS", flush=True)
         print('SANITY_VALIDATION_SUMMARY: {"operations": 1, "status": "probe"}', flush=True)

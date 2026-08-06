@@ -1,0 +1,12 @@
+# Infrastructure probe, not an experiment. Reports what the compute node can
+# reach and import, so the execution basis is settled before any science runs.
+run_id: probe
+method: infrastructure-probe
+method_type: probe
+aggregation: cg_pli   # unused; the probe returns before any scoring
+dataset: none
+probe_only: true
+description: >-
+  Skip the experiment. Report CPU architecture, whether the four BioNeMo NIM
+  endpoints are reachable, whether OpenStructure imports from its conda
+  prefix, and whether the shared group directory is writable.
