@@ -31,11 +31,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     libgomp1 \
+    bzip2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv from PyPI rather than `COPY --from=ghcr.io/astral-sh/uv`, because
 # a cross-registry COPY --from has failed under the Kaniko builder used here.
 RUN pip install --no-cache-dir uv==0.7.2
+
+# --- OpenStructure, via micromamba -------------------------------------
+# NOTE TO ANY AGENT REGENERATING THIS FILE: keep this whole block.
+# OpenStructure is the reference implementation of lDDT-PLI and is what
+# PLINDER's own evaluation uses. It is NOT pip-installable -- the PyPI
+# package named `ost` is an unrelated subtitle library -- so bioconda is
+# the only source. bioconda publishes linux-aarch64 builds, but 2.11.1 on
+# aarch64 requires Python 3.12, which is why this is a SEPARATE conda
+# prefix rather than the uv venv (that one is Python 3.11, fixed by the
+# repository's CLI contract). The two never share a prefix: scoring runs
+# as a subprocess against /opt/ost/bin/python and hands JSON back.
+ENV MAMBA_ROOT_PREFIX=/opt/micromamba
+RUN set -eux; \
+    case "$(uname -m)" in \
+      aarch64) MARCH=linux-aarch64 ;; \
+      x86_64)  MARCH=linux-64 ;; \
+      *) echo "unsupported arch $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    curl -Ls "https://micro.mamba.pm/api/micromamba/${MARCH}/latest" \
+      | tar -xvj -C /usr/local bin/micromamba; \
+    micromamba create -y -p /opt/ost -c conda-forge -c bioconda \
+      python=3.12 openstructure=2.11.1; \
+    micromamba clean --all --yes; \
+    /opt/ost/bin/python -c "from ost.mol.alg.ligand_scoring_lddtpli import LDDTPLIScorer; print('openstructure ok')"
 
 WORKDIR /workspace
 

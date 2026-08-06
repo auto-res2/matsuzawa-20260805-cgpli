@@ -39,6 +39,10 @@ experiment:
   # adversary is allowed to try.
   n_orientations: 16
 
+  # Infrastructure probe: skip the experiment and report what the compute
+  # node can actually reach and write. Diagnostic only.
+  probe_only: false
+
   # PoseBusters supplies the validity gate. Disable only for debugging.
   posebusters: true
 

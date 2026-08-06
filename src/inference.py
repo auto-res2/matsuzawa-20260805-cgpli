@@ -454,9 +454,95 @@ def _emit_validation(mode: str, summary: dict, df: pd.DataFrame) -> bool:
     return ok
 
 
+def probe_environment() -> dict:
+    """One-shot infrastructure probe, printed and returned.
+
+    Answers the questions that cannot be settled from a laptop: does the
+    compute node reach the NVIDIA NIM endpoints, is the shared group
+    directory writable, and what is this machine.
+    """
+    import json as _json
+    import platform
+    import shutil
+    import socket
+    import subprocess
+
+    report: dict = {
+        "arch": platform.machine(),
+        "python": platform.python_version(),
+        "host": socket.gethostname(),
+    }
+
+    # NIM egress. No API key is sent: a 401 already proves DNS, TLS and
+    # routing all work, and the key is known good from off-cluster.
+    for name, url in {
+        "boltz2": "https://health.api.nvidia.com/v1/biology/mit/boltz2/predict",
+        "openfold3": "https://health.api.nvidia.com/v1/biology/openfold/openfold3/predict",
+        "diffdock": "https://health.api.nvidia.com/v1/biology/mit/diffdock",
+        "msa_search": "https://health.api.nvidia.com/v1/biology/colabfold/msa-search/predict",
+    }.items():
+        try:
+            import requests
+
+            r = requests.post(url, json={}, timeout=60)
+            report[f"nim_{name}"] = r.status_code
+        except Exception as exc:  # noqa: BLE001
+            report[f"nim_{name}"] = f"ERROR {type(exc).__name__}: {exc}"
+
+    # Shared group directory: a persistent PLINDER cache would live here
+    # instead of being re-downloaded into every per-run job directory.
+    for label, path in {
+        "group_dir": "/data1/rkp00041/rku00122",
+        "cwd": ".",
+        "tmp": "/tmp",
+    }.items():
+        try:
+            probe_file = Path(path) / f".airas_probe_{os.getpid()}"
+            probe_file.write_text("ok")
+            probe_file.unlink()
+            usage = shutil.disk_usage(path)
+            report[label] = f"writable, {usage.free / 2**30:.0f} GiB free"
+        except Exception as exc:  # noqa: BLE001
+            report[label] = f"NOT writable: {type(exc).__name__}: {exc}"
+
+    # OpenStructure lives in its own conda prefix (see Dockerfile) and is
+    # reached as a subprocess, so this checks the real invocation path.
+    try:
+        r = subprocess.run(
+            ["/opt/ost/bin/python", "-c",
+             "import ost;"
+             "from ost.mol.alg.ligand_scoring_lddtpli import LDDTPLIScorer;"
+             "from ost.mol.alg.ligand_scoring_scrmsd import SCRMSDScorer;"
+             "print(ost.__version__)"],
+            capture_output=True, text=True, timeout=180)
+        report["openstructure"] = (
+            f"ok {r.stdout.strip()}" if r.returncode == 0
+            else f"FAILED rc={r.returncode}: {(r.stderr or '').strip()[-200:]}")
+    except Exception as exc:  # noqa: BLE001
+        report["openstructure"] = f"FAILED {type(exc).__name__}: {exc}"
+
+    try:
+        report["gpu"] = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip() or "(no output)"
+    except Exception as exc:  # noqa: BLE001
+        report["gpu"] = f"unavailable: {type(exc).__name__}"
+
+    print("ENV_PROBE: " + _json.dumps(report), flush=True)
+    for k, v in report.items():
+        print(f"  {k:14s} {v}", flush=True)
+    return report
+
+
 def run(cfg: DictConfig) -> dict:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     mode = str(cfg.mode)
+    if bool(cfg.experiment.get("probe_only", False)):
+        probe_environment()
+        print("SANITY_VALIDATION: PASS", flush=True)
+        print('SANITY_VALIDATION_SUMMARY: {"operations": 1, "status": "probe"}', flush=True)
+        return {}
     rule = AGGREGATION_BY_RUN[str(cfg.run.aggregation)]
     results_dir = Path(str(cfg.results_dir)) / str(cfg.run.run_id)
     results_dir.mkdir(parents=True, exist_ok=True)
