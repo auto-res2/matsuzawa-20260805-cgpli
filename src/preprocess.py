@@ -217,9 +217,9 @@ def build_systems(mode: str, data_cfg: dict, cache_dir: Path) -> list[System]:
     wanted = wanted[: int(n)]
 
     # Prefetch the shards concurrently. Serial fetching of the ~7 s shards was
-    # taking over half an hour for the full subset, which alone exceeded the
-    # executor's activity heartbeat timeout; the downloads are latency-bound,
-    # not bandwidth-bound, so a modest pool collapses that to a few minutes.
+    # taking over half an hour for the full subset and dominated the wall
+    # clock; the downloads are latency-bound, not bandwidth-bound, so a modest
+    # pool collapses that to a few minutes.
     shards = sorted({_shard_for(s) for s in wanted})
     logger.info("prefetching %d shards for %d systems", len(shards), len(wanted))
     workers = int(cfg_workers) if (cfg_workers := data_cfg.get("download_workers", 12)) else 12

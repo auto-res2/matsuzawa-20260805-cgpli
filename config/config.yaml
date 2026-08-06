@@ -24,13 +24,14 @@ experiment:
   # pilot and full pull real PLINDER systems from the public bucket.
   n_systems_sanity: 4
   n_systems_pilot: 20
-  # 150 systems, not the full 346. The executor kills a run at roughly 30
-  # minutes with "activity Heartbeat timeout", and 150 is what fits with
-  # margin. It is also the size the original brief asked for (150-200).
+  # 150 systems out of the 346 in the MLSB subset, which is the size the
+  # original brief asked for (150-200). There is no execution-time reason to
+  # stop here: an earlier batch died at ~31 minutes, but that was a rolling
+  # deploy of the executor's workers, not a duration limit.
   n_systems_full: 150
 
   # Shard downloads are latency-bound; fetching them serially took over half
-  # an hour on its own and tripped the heartbeat timeout.
+  # an hour on its own, which dominated the wall clock.
   download_workers: 12
 
   # Orientation search budget for the blackhole_busted adversary. This is the

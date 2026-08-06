@@ -91,9 +91,8 @@ class ValidityChecker:
         """Check every pose for one system in a single call.
 
         Batching matters: in "dock" mode PoseBusters re-parses the receptor
-        for each call, and eleven separate calls per system made the run
-        exceed the executor's activity heartbeat timeout. One call per system
-        parses the receptor once.
+        for each call, so eleven separate calls per system paid for eleven
+        parses. One call per system parses the receptor once.
         """
         if not self.enabled:
             return [(True, {}) for _ in mols]
@@ -190,8 +189,8 @@ def _score_one_system(payload: tuple) -> list[dict]:
     """Score every predictor for a single system. Runs in a worker process.
 
     Scoring is embarrassingly parallel across systems and dominated by
-    PoseBusters, so spreading it over the node's cores is what keeps a full
-    run inside the executor's activity heartbeat timeout.
+    PoseBusters, so spreading it over the node's cores is the single largest
+    saving in a full run.
     """
     system, seed, n_orient, pb_enabled = payload
     checker = _worker_checker(pb_enabled)
